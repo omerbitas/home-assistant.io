@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">RTSP Watch</string>
+    <string name="add_hint">rtsp://user:pass@192.168.1.10:554/stream</string>
+    <string name="add">Add stream</string>
+    <string name="no_streams">No streams yet.\nAdd an RTSP URL below.</string>
+    <string name="connecting_wifi">Connecting to Wi‑Fi…</string>
+    <string name="buffering">Connecting to camera…</string>
+    <string name="deleted">Stream removed</string>
+    <string name="invalid_url">URL must start with rtsp://</string>
+    <string name="long_press_hint">Long‑press a stream to delete it</string>
+    <string name="retrying">Retrying…</string>
+</resources>
