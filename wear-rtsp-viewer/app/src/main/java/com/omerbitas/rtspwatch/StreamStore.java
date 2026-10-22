@@ -34,15 +34,24 @@ final class StreamStore {
 
     private static final String KEY = "streams";
     private final SharedPreferences prefs;
+    private final String defaultUrl;
 
     StreamStore(Context context) {
         prefs = context.getSharedPreferences("streams", Context.MODE_PRIVATE);
+        defaultUrl = context.getString(R.string.default_stream_url).trim();
     }
 
     List<Stream> load() {
         List<Stream> streams = new ArrayList<>();
+        String json = prefs.getString(KEY, null);
+        if (json == null) {
+            // First launch: start with the stream baked in at build time, if any.
+            if (!defaultUrl.isEmpty()) streams.add(new Stream(defaultUrl));
+            save(streams);
+            return streams;
+        }
         try {
-            JSONArray array = new JSONArray(prefs.getString(KEY, "[]"));
+            JSONArray array = new JSONArray(json);
             for (int i = 0; i < array.length(); i++) {
                 streams.add(new Stream(array.getJSONObject(i).getString("url")));
             }

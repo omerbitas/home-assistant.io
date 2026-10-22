@@ -17,6 +17,8 @@ import java.util.List;
 /**
  * Lists saved streams. Tap to watch, long-press to delete.
  *
+ * <p>When exactly one stream is saved, launching the app opens it straight away.
+ *
  * <p>Streams can also be added from a computer instead of the watch keyboard:
  * {@code adb shell am start -n com.omerbitas.rtspwatch/.MainActivity --es add_url "rtsp://..."}
  */
@@ -57,8 +59,16 @@ public class MainActivity extends Activity {
         // Lets the rotating bezel / crown scroll the list.
         findViewById(R.id.scroll).requestFocus();
 
+        boolean adding = getIntent() != null && getIntent().hasExtra(EXTRA_ADD_URL);
         handleIntent(getIntent());
         render();
+
+        // With a single saved stream, opening the app goes straight to the live view.
+        List<StreamStore.Stream> streams = store.load();
+        if (savedInstanceState == null && !adding && streams.size() == 1) {
+            startActivity(new Intent(this, PlayerActivity.class)
+                    .putExtra(PlayerActivity.EXTRA_URL, streams.get(0).url));
+        }
     }
 
     @Override
