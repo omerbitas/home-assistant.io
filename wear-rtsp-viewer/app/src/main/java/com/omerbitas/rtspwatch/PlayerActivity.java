@@ -15,7 +15,9 @@ import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.graphics.Bitmap;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -53,6 +55,13 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private boolean showStats;
     private int lastRendered;
 
+    // Away from home (no Wi-Fi, or the camera can't be reached directly): Home Assistant pictures.
+    private HomeAssistant homeAssistant;
+    private HomeAssistant.Stream awayStream;
+    private ImageView awayView;
+    private boolean onWifi;
+    private int directFailures;
+
     private RtspClient client;
     private Thread clientThread;
     private VideoDecoder decoder;
@@ -69,6 +78,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         status = findViewById(R.id.status);
         connectivity = getSystemService(ConnectivityManager.class);
         surfaceView.getHolder().addCallback(this);
+        awayView = findViewById(R.id.away_image);
+        homeAssistant = HomeAssistant.fromResources(this);
 
         audioManager = getSystemService(AudioManager.class);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -131,6 +142,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void toggleMute() {
+        if (awayStream != null) {
+            Toast.makeText(this, R.string.sound_home_only, Toast.LENGTH_SHORT).show();
+            return;
+        }
         muted = !muted;
         AudioPlayer a = audio;
         if (a != null) a.setMuted(muted);
@@ -160,6 +175,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         active = true;
         CameraTileService.stopFeed();
         started = true;
+        onWifi = false;
+        directFailures = 0;
         requestWifi();
     }
 
@@ -192,6 +209,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public void run() {
                         handler.removeCallbacks(networkFallback);
+                        onWifi = true;
                         onNetworkReady();
                     }
                 });
@@ -256,7 +274,13 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     // Streaming
 
     private void startSession() {
-        if (!started || !networkReady || surface == null || client != null) return;
+        if (!started || !networkReady || surface == null || client != null || awayStream != null) return;
+        // The camera's LAN address only works on Wi-Fi; otherwise (or if it failed) use Home Assistant.
+        if (homeAssistant != null && (!onWifi || directFailures > 0)) {
+            startAwaySession();
+            return;
+        }
+        awayView.setVisibility(View.GONE);
         stage = getString(R.string.buffering);
         codecLabel = "";
         frameCount = 0;
@@ -347,6 +371,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public void run() {
                         if (client != self[0]) return; // stale session
+                        directFailures++;
                         String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                         showStatus(message + "\n" + getString(R.string.retrying));
                         stopSession();
@@ -362,10 +387,52 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         handler.post(diagnosticsTicker);
     }
 
+    private void startAwaySession() {
+        stage = getString(R.string.away_mode);
+        pictureShown = false;
+        awayView.setVisibility(View.VISIBLE);
+        int size = Math.max(findViewById(R.id.root).getWidth(), 480);
+        final HomeAssistant.Stream[] self = new HomeAssistant.Stream[1];
+        awayStream = homeAssistant.new Stream(size, new HomeAssistant.FrameListener() {
+            @Override
+            public void onFrame(final Bitmap frame) {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (awayStream != self[0]) return;
+                        awayView.setImageBitmap(frame);
+                        if (!pictureShown) {
+                            pictureShown = true;
+                            if (!showStats) showStatus(null);
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onError(final Exception e) {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (awayStream != self[0]) return;
+                        String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                        showStatus(message + "\n" + getString(R.string.retrying));
+                        stopSession();
+                        handler.postDelayed(retry, RETRY_DELAY_MS);
+                    }
+                });
+            }
+        });
+        self[0] = awayStream;
+        new Thread(awayStream, "home-assistant").start();
+        handler.removeCallbacks(diagnosticsTicker);
+        handler.post(diagnosticsTicker);
+    }
+
     private final Runnable diagnosticsTicker = new Runnable() {
         @Override
         public void run() {
-            if (client == null || (pictureShown && !showStats)) return;
+            if ((client == null && awayStream == null) || (pictureShown && !showStats)) return;
             updateDiagnostics();
             handler.postDelayed(this, 1000);
         }
@@ -373,8 +440,14 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     /** Shows what stage the connection is at, so a stuck stream can be diagnosed on the watch. */
     private void updateDiagnostics() {
-        if ((pictureShown && !showStats) || client == null) return;
+        if ((pictureShown && !showStats) || (client == null && awayStream == null)) return;
         StringBuilder sb = new StringBuilder(pictureShown ? "" : stage);
+        if (awayStream != null) {
+            if (pictureShown) sb.append(getString(R.string.away_mode));
+            sb.append("\nPictures ").append(awayStream.frames());
+            showStatus(sb.toString());
+            return;
+        }
         if (!codecLabel.isEmpty()) sb.append("\n\n").append(codecLabel).append(" video");
         if (client.rtpPackets() > 0) sb.append("\nPackets ").append(client.rtpPackets());
         if (frameCount > 0) {
@@ -427,6 +500,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             audio.release();
             audio = null;
         }
+        if (awayStream != null) {
+            awayStream.stop();
+            awayStream = null;
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -437,6 +514,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         View root = findViewById(R.id.root);
         int w = root.getWidth();
         int h = root.getHeight();
+        awayView.setScaleType(fill ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
         if (videoWidth <= 0 || videoHeight <= 0 || w == 0 || h == 0) return;
         float scale = fill
                 ? Math.max((float) w / videoWidth, (float) h / videoHeight)

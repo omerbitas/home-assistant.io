@@ -18,4 +18,10 @@
     <string name="tile_offline">Offline</string>
     <string name="tile_no_stream">Add a camera in the app</string>
     <string name="tap_for_sound">Tap for sound</string>
+    <!-- Optional Home Assistant access for viewing away from home; build.sh fills these. -->
+    <string name="ha_url" translatable="false"></string>
+    <string name="ha_token" translatable="false"></string>
+    <string name="ha_camera" translatable="false"></string>
+    <string name="away_mode">Away from home: via Home Assistant</string>
+    <string name="sound_home_only">Sound is only available at home</string>
 </resources>

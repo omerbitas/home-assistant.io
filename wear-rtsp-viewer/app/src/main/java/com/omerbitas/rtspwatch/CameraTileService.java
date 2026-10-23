@@ -97,6 +97,11 @@ public class CameraTileService extends Service {
     private static Handler worker;
     private static Snapshot.Feed feed;
     private static WifiRequest feedNetwork;
+    /** True while pictures come from Home Assistant instead of the camera (away from home). */
+    private static boolean awayPolling;
+    /** When the camera last couldn't be reached directly; Home Assistant is used for a while after. */
+    private static long directFailedAt;
+    private static final long DIRECT_RETRY_MS = 2 * 60 * 1000;
 
     private final Binder binder = new Binder() {
         @Override
@@ -210,7 +215,7 @@ public class CameraTileService extends Service {
         long now = System.currentTimeMillis();
         synchronized (LOCK) {
             // The live view gets the camera to itself: many cameras only allow one or two connections.
-            if (PlayerActivity.isActive() || grabbing || feed != null) return;
+            if (PlayerActivity.isActive() || grabbing || feed != null || awayPolling) return;
             final boolean onScreen = visible && now - visibleSince < VISIBLE_MAX_MS;
             long delay;
             if (onScreen) {
@@ -240,6 +245,7 @@ public class CameraTileService extends Service {
     /** Stops the on-screen feed, e.g. when the tile is left or the live view opens. */
     static void stopFeed() {
         synchronized (LOCK) {
+            awayPolling = false;
             if (feed != null) {
                 feed.stop();
                 feed = null;
@@ -264,6 +270,7 @@ public class CameraTileService extends Service {
             return;
         }
         WifiRequest wifi = WifiRequest.await(context);
+        final HomeAssistant homeAssistant = HomeAssistant.fromResources(context);
         synchronized (LOCK) {
             grabbing = false;
             if (!visible || PlayerActivity.isActive()) {
@@ -271,6 +278,17 @@ public class CameraTileService extends Service {
                 return;
             }
             feedNetwork = wifi;
+            if (useHomeAssistant(homeAssistant, wifi)) {
+                awayPolling = true;
+                worker.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!pollHomeAssistant(context, homeAssistant)) return;
+                        worker.postDelayed(this, VISIBLE_INTERVAL_MS);
+                    }
+                });
+                return;
+            }
             feed = new Snapshot.Feed(streams.get(0).url, wifi.socketFactory(), SNAPSHOT_WIDTH, VISIBLE_INTERVAL_MS,
                     new Snapshot.Feed.Callback() {
                         @Override
@@ -291,6 +309,7 @@ public class CameraTileService extends Service {
                         public void onError(Exception e) {
                             synchronized (LOCK) {
                                 lastGrabFailed = true;
+                                directFailedAt = System.currentTimeMillis();
                             }
                             stopFeed();
                             requestUpdate(context);
@@ -309,9 +328,23 @@ public class CameraTileService extends Service {
         List<StreamStore.Stream> streams = new StreamStore(context).load();
         if (!streams.isEmpty()) {
             WifiRequest wifi = WifiRequest.await(context);
+            HomeAssistant homeAssistant = HomeAssistant.fromResources(context);
             try {
-                Snapshot snapshot = Snapshot.grab(streams.get(0).url, wifi.socketFactory(), SNAPSHOT_WIDTH,
-                        SNAPSHOT_TIMEOUT_MS);
+                Snapshot snapshot;
+                if (useHomeAssistant(homeAssistant, wifi)) {
+                    snapshot = Snapshot.fromBitmap(homeAssistant.snapshot(SNAPSHOT_WIDTH), SNAPSHOT_WIDTH);
+                } else {
+                    try {
+                        snapshot = Snapshot.grab(streams.get(0).url, wifi.socketFactory(), SNAPSHOT_WIDTH,
+                                SNAPSHOT_TIMEOUT_MS);
+                    } catch (Exception e) {
+                        if (homeAssistant == null) throw e;
+                        synchronized (LOCK) {
+                            directFailedAt = System.currentTimeMillis();
+                        }
+                        snapshot = Snapshot.fromBitmap(homeAssistant.snapshot(SNAPSHOT_WIDTH), SNAPSHOT_WIDTH);
+                    }
+                }
                 snapshot.save(snapshotFile(context));
                 synchronized (LOCK) {
                     remember(snapshot);
@@ -329,6 +362,40 @@ public class CameraTileService extends Service {
         }
         requestUpdate(context);
         maybeRefresh(context); // switches to the live feed if the tile came on screen meanwhile
+    }
+
+    /** The camera's LAN address only works on Wi-Fi, and not at all if it recently failed. */
+    private static boolean useHomeAssistant(HomeAssistant homeAssistant, WifiRequest wifi) {
+        if (homeAssistant == null) return false;
+        synchronized (LOCK) {
+            return wifi.socketFactory() == null || System.currentTimeMillis() - directFailedAt < DIRECT_RETRY_MS;
+        }
+    }
+
+    /** Runs on the worker thread; returns whether to keep polling. */
+    private static boolean pollHomeAssistant(Context context, HomeAssistant homeAssistant) {
+        synchronized (LOCK) {
+            if (!awayPolling) return false;
+        }
+        boolean failed = false;
+        try {
+            Snapshot snapshot = Snapshot.fromBitmap(homeAssistant.snapshot(SNAPSHOT_WIDTH), SNAPSHOT_WIDTH);
+            snapshot.save(snapshotFile(context));
+            synchronized (LOCK) {
+                remember(snapshot);
+            }
+        } catch (Exception e) {
+            failed = true;
+        }
+        boolean keepGoing;
+        synchronized (LOCK) {
+            lastGrabFailed = failed;
+            keepGoing = awayPolling && visible && !PlayerActivity.isActive()
+                    && System.currentTimeMillis() - visibleSince < VISIBLE_MAX_MS;
+        }
+        requestUpdate(context);
+        if (!keepGoing) stopFeed();
+        return keepGoing;
     }
 
     /** Like the live view: use Wi-Fi directly rather than the Bluetooth link to the phone. */

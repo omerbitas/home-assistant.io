@@ -72,7 +72,7 @@ final class RtspClient implements Runnable {
     static final String MIME_H264 = "video/avc";
     static final String MIME_H265 = "video/hevc";
 
-    private static final int CONNECT_TIMEOUT_MS = 8000;
+    private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 10000;
     private static final int KEEPALIVE_MS = 20000;
     private static final byte[] START_CODE = {0, 0, 0, 1};

@@ -1,5 +1,6 @@
 package com.omerbitas.rtspwatch;
 
+import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.media.Image;
 import android.media.MediaCodec;
@@ -37,6 +38,17 @@ final class Snapshot {
         this.width = width;
         this.height = height;
         this.timeMillis = timeMillis;
+    }
+
+    /** Converts a picture (e.g. from Home Assistant) to a snapshot at most maxWidth wide. */
+    static Snapshot fromBitmap(Bitmap bitmap, int maxWidth) {
+        int w = Math.min(maxWidth, bitmap.getWidth());
+        int h = Math.max(1, Math.round((float) bitmap.getHeight() * w / bitmap.getWidth()));
+        Bitmap scaled = Bitmap.createScaledBitmap(bitmap, w, h, true);
+        Bitmap rgb565 = scaled.copy(Bitmap.Config.RGB_565, false);
+        ByteBuffer pixels = ByteBuffer.allocate(w * h * 2);
+        rgb565.copyPixelsToBuffer(pixels); // native (little-endian) order, as the tile expects
+        return new Snapshot(pixels.array(), w, h, System.currentTimeMillis());
     }
 
     // ---------------------------------------------------------------------------------------

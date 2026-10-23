@@ -12,6 +12,15 @@
         android:layout_height="match_parent"
         android:layout_gravity="center" />
 
+    <!-- Pictures from Home Assistant when away from home. -->
+    <ImageView
+        android:id="@+id/away_image"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitCenter"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="wrap_content"

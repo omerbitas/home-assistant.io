@@ -3,7 +3,8 @@
 #
 # Requirements (Debian/Ubuntu): sudo apt install aapt apksigner dalvik-exchange zipalign openjdk-17-jdk
 # plus an API 34 android.jar, passed as ANDROID_JAR (defaults to $ANDROID_HOME/platforms/android-34/android.jar).
-# Set DEFAULT_STREAM_URL to build an APK that already contains your camera.
+# Set DEFAULT_STREAM_URL (and optionally HA_URL, HA_TOKEN, HA_CAMERA) to build an APK that already
+# contains your camera.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -19,19 +20,23 @@ mkdir -p "$OUT/gen" "$OUT/classes"
 echo "== Compiling resources"
 # The manifest has no package attribute (Gradle sets it from 'namespace'), so inject it here.
 sed 's|<manifest |<manifest package="com.omerbitas.rtspwatch" |' "$SRC/AndroidManifest.xml" > "$OUT/AndroidManifest.xml"
-# Optionally bake a stream into the APK so it opens with no setup on the watch.
+# Optionally bake settings into the APK so it works with no setup on the watch:
+# DEFAULT_STREAM_URL (the camera), and HA_URL / HA_TOKEN / HA_CAMERA for viewing away from home.
 rm -rf "$OUT/res" && cp -r "$SRC/res" "$OUT/res"
-if [ -n "${DEFAULT_STREAM_URL:-}" ]; then
-    DEFAULT_STREAM_URL="$DEFAULT_STREAM_URL" python3 - "$OUT/res/values/strings.xml" <<'PY'
+python3 - "$OUT/res/values/strings.xml" <<'PY'
 import os, sys
 from xml.sax.saxutils import escape
 path = sys.argv[1]
-url = escape(os.environ["DEFAULT_STREAM_URL"]).replace("'", "\\'").replace('"', '\\"')
-text = open(path).read().replace('name="default_stream_url" translatable="false"></string>',
-                                 'name="default_stream_url" translatable="false">' + url + '</string>')
+text = open(path).read()
+for env, name in [("DEFAULT_STREAM_URL", "default_stream_url"), ("HA_URL", "ha_url"),
+                  ("HA_TOKEN", "ha_token"), ("HA_CAMERA", "ha_camera")]:
+    value = os.environ.get(env, "")
+    if value:
+        value = escape(value).replace("'", "\\'").replace('"', '\\"')
+        text = text.replace('name="%s" translatable="false"></string>' % name,
+                            'name="%s" translatable="false">%s</string>' % (name, value))
 open(path, "w").write(text)
 PY
-fi
 aapt2 compile --dir "$OUT/res" -o "$OUT/res.zip"
 aapt2 link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
     --manifest "$OUT/AndroidManifest.xml" \
