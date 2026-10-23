@@ -16,6 +16,8 @@ final class VideoDecoder {
 
     interface Listener {
         void onVideoSize(int width, int height);
+
+        void onFirstFrameRendered();
     }
 
     private static final long INPUT_TIMEOUT_US = 20000;
@@ -29,6 +31,22 @@ final class VideoDecoder {
     private MediaCodec codec;
     private Thread outputThread;
     private volatile boolean running;
+    private volatile int queuedFrames;
+    private volatile int renderedFrames;
+    private volatile String codecName;
+
+    int queuedFrames() {
+        return queuedFrames;
+    }
+
+    int renderedFrames() {
+        return renderedFrames;
+    }
+
+    /** Name of the decoder in use, or null before the first key frame. */
+    String codecName() {
+        return codecName;
+    }
 
     VideoDecoder(Surface surface, Listener listener) {
         this.surface = surface;
@@ -58,6 +76,7 @@ final class VideoDecoder {
         buffer.clear();
         buffer.put(data, 0, length);
         codec.queueInputBuffer(index, 0, length, timestampUs, keyFrame ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
+        queuedFrames++;
     }
 
     private void start() throws IOException {
@@ -78,6 +97,7 @@ final class VideoDecoder {
         }
 
         codec = MediaCodec.createDecoderByType(mime);
+        codecName = codec.getName();
         codec.configure(format, surface, null, 0);
         codec.start();
         running = true;
@@ -98,6 +118,7 @@ final class VideoDecoder {
                 int index = c.dequeueOutputBuffer(info, 10000);
                 if (index >= 0) {
                     c.releaseOutputBuffer(index, true);
+                    if (renderedFrames++ == 0) listener.onFirstFrameRendered();
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     MediaFormat f = c.getOutputFormat();
                     int width = f.getInteger(MediaFormat.KEY_WIDTH);

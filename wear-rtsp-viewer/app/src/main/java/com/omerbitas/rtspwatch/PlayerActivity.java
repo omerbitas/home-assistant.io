@@ -36,6 +36,13 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private int videoWidth;
     private int videoHeight;
 
+    // Diagnostics shown until the first picture appears.
+    private String stage;
+    private String codecLabel = "";
+    private volatile int frameCount;
+    private volatile int keyFrameCount;
+    private boolean pictureShown;
+
     private RtspClient client;
     private Thread clientThread;
     private VideoDecoder decoder;
@@ -159,8 +166,13 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     private void startSession() {
         if (!started || !networkReady || surface == null || client != null) return;
-        showStatus(getString(R.string.buffering));
+        stage = getString(R.string.buffering);
+        codecLabel = "";
+        frameCount = 0;
+        keyFrameCount = 0;
+        pictureShown = false;
 
+        final VideoDecoder[] decRef = new VideoDecoder[1];
         final VideoDecoder dec = new VideoDecoder(surface.getSurface(), new VideoDecoder.Listener() {
             @Override
             public void onVideoSize(final int width, final int height) {
@@ -169,12 +181,24 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     public void run() {
                         videoWidth = width;
                         videoHeight = height;
-                        showStatus(null);
                         layoutVideo();
                     }
                 });
             }
+
+            @Override
+            public void onFirstFrameRendered() {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (decoder != decRef[0]) return;
+                        pictureShown = true;
+                        showStatus(null);
+                    }
+                });
+            }
         });
+        decRef[0] = dec;
         decoder = dec;
         final RtspClient[] self = new RtspClient[1];
         client = new RtspClient(url, new RtspClient.Listener() {
@@ -183,18 +207,22 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (text != null) showStatus(text);
+                        if (text != null) stage = text;
+                        updateDiagnostics();
                     }
                 });
             }
 
             @Override
             public void onTrack(String mime, byte[][] parameterSets) {
+                codecLabel = RtspClient.MIME_H265.equals(mime) ? "H.265" : "H.264";
                 dec.setTrack(mime, parameterSets);
             }
 
             @Override
             public void onFrame(byte[] data, int length, long timestampUs, boolean keyFrame) {
+                frameCount++;
+                if (keyFrame) keyFrameCount++;
                 try {
                     dec.feed(data, length, timestampUs, keyFrame);
                 } catch (Exception e) {
@@ -220,6 +248,35 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         self[0] = client;
         clientThread = new Thread(client, "rtsp");
         clientThread.start();
+        handler.removeCallbacks(diagnosticsTicker);
+        handler.post(diagnosticsTicker);
+    }
+
+    private final Runnable diagnosticsTicker = new Runnable() {
+        @Override
+        public void run() {
+            if (client == null || pictureShown) return;
+            updateDiagnostics();
+            handler.postDelayed(this, 1000);
+        }
+    };
+
+    /** Shows what stage the connection is at, so a stuck stream can be diagnosed on the watch. */
+    private void updateDiagnostics() {
+        if (pictureShown || client == null) return;
+        StringBuilder sb = new StringBuilder(stage);
+        if (!codecLabel.isEmpty()) sb.append("\n\n").append(codecLabel).append(" video");
+        if (frameCount > 0) {
+            sb.append("\nReceived ").append(frameCount).append(" frames (")
+                    .append(keyFrameCount).append(" key)");
+        }
+        VideoDecoder dec = decoder;
+        if (dec != null && dec.codecName() != null) {
+            sb.append("\nDecoder ").append(dec.codecName())
+                    .append("\nIn ").append(dec.queuedFrames())
+                    .append(" / out ").append(dec.renderedFrames());
+        }
+        showStatus(sb.toString());
     }
 
     private final Runnable retry = new Runnable() {
@@ -231,6 +288,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     private void stopSession() {
         handler.removeCallbacks(retry);
+        handler.removeCallbacks(diagnosticsTicker);
         if (client != null) {
             client.stop();
             client = null;

@@ -65,6 +65,7 @@ final class RtspClient implements Runnable {
     private String authHeader; // "Basic" or parsed Digest challenge
     private Map<String, String> digest;
     private boolean useGetParameter = false;
+    private int videoChannel = 0;
     private int nonceCount;
 
     // Depacketizer state.
@@ -110,19 +111,26 @@ final class RtspClient implements Runnable {
     @Override
     public void run() {
         try {
+            listener.onStatus("Connecting to " + uri.getHost() + "…");
             connect();
+            listener.onStatus("Logging in…");
             String sdp = request("DESCRIBE", requestUrl, "Accept: application/sdp\r\n").body;
             String baseUrl = lastContentBase != null ? lastContentBase : requestUrl;
             String control = parseVideoTrack(sdp, baseUrl);
 
             Response setup = request("SETUP", control,
                     "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n");
+            String transport = setup.headers.get("transport");
+            if (transport != null) {
+                Matcher m = Pattern.compile("interleaved=(\\d+)").matcher(transport);
+                if (m.find()) videoChannel = Integer.parseInt(m.group(1));
+            }
             String sessionHeader = setup.headers.get("session");
             if (sessionHeader == null) throw new IOException("Camera did not return a session");
             session = sessionHeader.split(";")[0].trim();
 
             request("PLAY", baseUrl, "Range: npt=0.000-\r\n");
-            listener.onStatus(null);
+            listener.onStatus("Waiting for video…");
             readLoop();
         } catch (Exception e) {
             if (running) listener.onError(e);
@@ -392,7 +400,7 @@ final class RtspClient implements Runnable {
                 int channel = in.readUnsignedByte();
                 int length = in.readUnsignedShort();
                 in.readFully(packet, 0, length);
-                if (channel == 0) handleRtp(packet, length);
+                if (channel == videoChannel) handleRtp(packet, length);
             } else if (b == 'R') {
                 // Interleaved RTSP response, e.g. to a keep-alive. Consume and ignore.
                 readLine();
@@ -439,14 +447,14 @@ final class RtspClient implements Runnable {
     private void depacketizeH264(byte[] p, int offset, int end) {
         int type = p[offset] & 0x1F;
         if (type >= 1 && type <= 23) {
-            appendNal(p, offset, end - offset, type == 5);
+            appendNal(p, offset, end - offset, isH264Key(type));
         } else if (type == 24) { // STAP-A
             int i = offset + 1;
             while (i + 2 <= end) {
                 int size = ((p[i] & 0xFF) << 8) | (p[i + 1] & 0xFF);
                 i += 2;
                 if (size == 0 || i + size > end) break;
-                appendNal(p, i, size, (p[i] & 0x1F) == 5);
+                appendNal(p, i, size, isH264Key(p[i] & 0x1F));
                 i += size;
             }
         } else if (type == 28 && end - offset > 2) { // FU-A
@@ -463,7 +471,7 @@ final class RtspClient implements Runnable {
             fragment.write(p, offset + 2, end - offset - 2);
             if (last) {
                 byte[] nal = fragment.toByteArray();
-                appendNal(nal, 0, nal.length, nalType == 5);
+                appendNal(nal, 0, nal.length, isH264Key(nalType));
                 fragmentValid = false;
             }
         }
@@ -504,8 +512,13 @@ final class RtspClient implements Runnable {
         }
     }
 
+    /** IDR slices, plus SPS: cameras that never send IDRs still send SPS before each I-frame. */
+    private static boolean isH264Key(int type) {
+        return type == 5 || type == 7;
+    }
+
     private static boolean isH265Key(int type) {
-        return type >= 16 && type <= 21;
+        return (type >= 16 && type <= 21) || type == 32 || type == 33;
     }
 
     private void appendNal(byte[] data, int offset, int length, boolean key) {
