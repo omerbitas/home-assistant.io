@@ -1,7 +1,6 @@
 package com.omerbitas.rtspwatch;
 
 import android.app.Activity;
-import android.content.SharedPreferences;
 import android.media.AudioManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -21,8 +20,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * Full-screen live view. Tap to mute/unmute, double-tap to switch between fit and fill, long-press
- * for statistics, turn the bezel/crown for volume, swipe right to go back.
+ * Full-screen live view. Sound starts off: tap to turn it on/off, swipe up/down for volume,
+ * double-tap to switch between fit and fill, long-press for statistics, swipe right to go back.
  */
 public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
@@ -59,8 +58,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private VideoDecoder decoder;
     private volatile AudioPlayer audio;
     private AudioManager audioManager;
-    private SharedPreferences prefs;
-    private boolean muted;
+    private boolean muted = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,8 +72,6 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
         audioManager = getSystemService(AudioManager.class);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
-        prefs = getSharedPreferences("player", MODE_PRIVATE);
-        muted = prefs.getBoolean("muted", false);
 
         final GestureDetector gestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
@@ -100,6 +96,13 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             public void onLongPress(MotionEvent e) {
                 toggleStats();
             }
+
+            @Override
+            public boolean onFling(MotionEvent e1, MotionEvent e2, float velocityX, float velocityY) {
+                if (Math.abs(velocityY) <= Math.abs(velocityX)) return false; // leave swipe-to-dismiss alone
+                changeVolume(velocityY < 0);
+                return true;
+            }
         });
         findViewById(R.id.root).setOnTouchListener(new View.OnTouchListener() {
             @Override
@@ -109,26 +112,26 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         });
     }
 
-    /** The rotating bezel / crown adjusts the volume. */
+    /** Watches with a rotating bezel or crown can use it for volume too. */
     @Override
     public boolean onGenericMotionEvent(MotionEvent event) {
         if (event.getAction() == MotionEvent.ACTION_SCROLL
                 && event.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
             float delta = -event.getAxisValue(MotionEvent.AXIS_SCROLL);
-            if (delta != 0) {
-                if (muted && delta > 0) toggleMute();
-                audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                        delta > 0 ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
-                        AudioManager.FLAG_SHOW_UI);
-            }
+            if (delta != 0) changeVolume(delta > 0);
             return true;
         }
         return super.onGenericMotionEvent(event);
     }
 
+    private void changeVolume(boolean up) {
+        if (muted && up) toggleMute();
+        audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                up ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+    }
+
     private void toggleMute() {
         muted = !muted;
-        prefs.edit().putBoolean("muted", muted).apply();
         AudioPlayer a = audio;
         if (a != null) a.setMuted(muted);
         Toast.makeText(this, muted ? R.string.muted : R.string.unmuted, Toast.LENGTH_SHORT).show();
@@ -273,6 +276,9 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                         if (decoder != decRef[0]) return;
                         pictureShown = true;
                         if (!showStats) showStatus(null);
+                        if (muted && audio != null) {
+                            Toast.makeText(PlayerActivity.this, R.string.tap_for_sound, Toast.LENGTH_SHORT).show();
+                        }
                     }
                 });
             }

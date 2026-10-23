@@ -13,4 +13,8 @@
     <string name="default_stream_url" translatable="false"></string>
     <string name="muted">Sound off</string>
     <string name="unmuted">Sound on</string>
+    <string name="tile_label">Camera</string>
+    <string name="tile_title">Camera</string>
+    <string name="tile_button">Watch live</string>
+    <string name="tap_for_sound">Tap for sound</string>
 </resources>

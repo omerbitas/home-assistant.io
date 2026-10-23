@@ -8,7 +8,8 @@ A small, standalone Wear OS app for watching a live RTSP camera feed on a Samsun
 - Supports Basic and Digest camera logins (`rtsp://user:password@host:554/path`) and `rtsps://`
 - Connects the watch directly to Wi‑Fi while a stream is open (not through the phone's Bluetooth link)
 - Reconnects automatically if the stream drops
-- Plays the camera's sound (AAC or G.711); tap to mute/unmute, turn the bezel/crown for volume
+- Plays the camera's sound (AAC or G.711). Sound starts off: tap to turn it on, swipe up/down for volume
+- Includes a **Camera** tile: swipe from the watch face and tap the button to open the live view
 - Double-tap to switch between fit and fill, long-press for connection statistics, swipe right to go back
 
 A prebuilt APK is at [`release/RtspWatch.apk`](release/RtspWatch.apk).
@@ -37,7 +38,8 @@ slow, so you can also send it from your computer while connected with adb:
 adb shell am start -n com.omerbitas.rtspwatch/.MainActivity --es add_url "rtsp://user:pass@192.168.1.20:554/stream2"
 ```
 
-Tap a stream to watch it. Long-press a stream to delete it. Special characters in the password must
+Tap a stream to watch it. Long-press a stream to delete it. To add the tile, long-press the watch face's tile area
+(or swipe to the end of your tiles), tap **+** and choose **Camera**. Special characters in the password must
 be URL-encoded (for example, `@` → `%40`).
 
 Typical URLs (use the camera's **sub-stream**: it is lower resolution, so it decodes quickly and uses
