@@ -1,6 +1,7 @@
 package com.omerbitas.rtspwatch;
 
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.view.Surface;
 
@@ -20,7 +21,9 @@ final class VideoDecoder {
         void onFirstFrameRendered();
     }
 
-    private static final long INPUT_TIMEOUT_US = 20000;
+    // Waiting briefly for a free input buffer is better than dropping a frame: every dropped
+    // frame corrupts the picture until the next key frame.
+    private static final long INPUT_TIMEOUT_US = 200000;
 
     private final Surface surface;
     private final Listener listener;
@@ -34,6 +37,9 @@ final class VideoDecoder {
     private volatile int queuedFrames;
     private volatile int renderedFrames;
     private volatile String codecName;
+    private volatile int droppedFrames;
+    private volatile String sizeInfo = "";
+    private boolean waitingForKeyFrame = true;
 
     int queuedFrames() {
         return queuedFrames;
@@ -41,6 +47,15 @@ final class VideoDecoder {
 
     int renderedFrames() {
         return renderedFrames;
+    }
+
+    int droppedFrames() {
+        return droppedFrames;
+    }
+
+    /** Stream resolution and the decoder's maximum, for diagnostics. */
+    String sizeInfo() {
+        return sizeInfo;
     }
 
     /** Name of the decoder in use, or null before the first key frame. */
@@ -62,26 +77,42 @@ final class VideoDecoder {
     /** Must be called from a single thread (the RTSP thread). */
     void feed(byte[] data, int length, long timestampUs, boolean keyFrame) throws IOException {
         scanParameterSets(data, length);
-        if (codec == null) {
-            if (!keyFrame) return; // decoding has to start at a key frame
-            start();
-        }
+        if (waitingForKeyFrame && !keyFrame) return; // decoding has to (re)start at a key frame
+        if (codec == null) start();
         int index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US);
-        if (index < 0) return; // decoder is behind; drop the frame rather than add latency
+        if (index < 0) {
+            dropFrame();
+            return;
+        }
         ByteBuffer buffer = codec.getInputBuffer(index);
         if (buffer == null || buffer.capacity() < length) {
             codec.queueInputBuffer(index, 0, 0, timestampUs, 0);
+            dropFrame();
             return;
         }
+        waitingForKeyFrame = false;
         buffer.clear();
         buffer.put(data, 0, length);
         codec.queueInputBuffer(index, 0, length, timestampUs, keyFrame ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
         queuedFrames++;
     }
 
+    private void dropFrame() {
+        droppedFrames++;
+        waitingForKeyFrame = true;
+    }
+
     private void start() throws IOException {
-        MediaFormat format = MediaFormat.createVideoFormat(mime, 1920, 1080);
-        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024);
+        int width = 1920;
+        int height = 1080;
+        H264Sps parsed = RtspClient.MIME_H264.equals(mime) && sps != null ? H264Sps.parse(sps) : null;
+        if (parsed != null) {
+            width = parsed.width;
+            height = parsed.height;
+        }
+        MediaFormat format = MediaFormat.createVideoFormat(mime, width, height);
+        // Big enough for a key frame of a high-resolution camera.
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(2 * 1024 * 1024, width * height));
         format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
         if (RtspClient.MIME_H264.equals(mime)) {
             if (sps != null) format.setByteBuffer("csd-0", ByteBuffer.wrap(withStartCode(sps)));
@@ -98,6 +129,15 @@ final class VideoDecoder {
 
         codec = MediaCodec.createDecoderByType(mime);
         codecName = codec.getName();
+        String size = parsed != null ? width + "x" + height : "?";
+        try {
+            MediaCodecInfo.VideoCapabilities caps =
+                    codec.getCodecInfo().getCapabilitiesForType(mime).getVideoCapabilities();
+            size += " (max " + caps.getSupportedWidths().getUpper() + "x"
+                    + caps.getSupportedHeights().getUpper() + ")";
+        } catch (RuntimeException ignored) {
+        }
+        sizeInfo = size;
         codec.configure(format, surface, null, 0);
         codec.start();
         running = true;

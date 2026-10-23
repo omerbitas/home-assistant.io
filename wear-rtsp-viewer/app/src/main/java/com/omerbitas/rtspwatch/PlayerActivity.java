@@ -42,6 +42,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private volatile int frameCount;
     private volatile int keyFrameCount;
     private boolean pictureShown;
+    private boolean showStats;
+    private int lastRendered;
 
     private RtspClient client;
     private Thread clientThread;
@@ -57,11 +59,26 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         connectivity = getSystemService(ConnectivityManager.class);
         surfaceView.getHolder().addCallback(this);
 
-        findViewById(R.id.root).setOnClickListener(new View.OnClickListener() {
+        View root = findViewById(R.id.root);
+        root.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 fill = !fill;
                 layoutVideo();
+            }
+        });
+        // Long-press shows/hides connection statistics over the video.
+        root.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                showStats = !showStats;
+                if (showStats) {
+                    handler.removeCallbacks(diagnosticsTicker);
+                    handler.post(diagnosticsTicker);
+                } else if (pictureShown) {
+                    showStatus(null);
+                }
+                return true;
             }
         });
     }
@@ -171,6 +188,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         frameCount = 0;
         keyFrameCount = 0;
         pictureShown = false;
+        lastRendered = 0;
 
         final VideoDecoder[] decRef = new VideoDecoder[1];
         final VideoDecoder dec = new VideoDecoder(surface.getSurface(), new VideoDecoder.Listener() {
@@ -193,7 +211,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     public void run() {
                         if (decoder != decRef[0]) return;
                         pictureShown = true;
-                        showStatus(null);
+                        if (!showStats) showStatus(null);
                     }
                 });
             }
@@ -255,7 +273,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private final Runnable diagnosticsTicker = new Runnable() {
         @Override
         public void run() {
-            if (client == null || pictureShown) return;
+            if (client == null || (pictureShown && !showStats)) return;
             updateDiagnostics();
             handler.postDelayed(this, 1000);
         }
@@ -263,8 +281,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     /** Shows what stage the connection is at, so a stuck stream can be diagnosed on the watch. */
     private void updateDiagnostics() {
-        if (pictureShown || client == null) return;
-        StringBuilder sb = new StringBuilder(stage);
+        if ((pictureShown && !showStats) || client == null) return;
+        StringBuilder sb = new StringBuilder(pictureShown ? "" : stage);
         if (!codecLabel.isEmpty()) sb.append("\n\n").append(codecLabel).append(" video");
         if (client.rtpPackets() > 0) sb.append("\nPackets ").append(client.rtpPackets());
         if (frameCount > 0) {
@@ -275,7 +293,12 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         if (dec != null && dec.codecName() != null) {
             sb.append("\nDecoder ").append(dec.codecName())
                     .append("\nIn ").append(dec.queuedFrames())
-                    .append(" / out ").append(dec.renderedFrames());
+                    .append(" / out ").append(dec.renderedFrames())
+                    .append(" / dropped ").append(dec.droppedFrames());
+            if (!dec.sizeInfo().isEmpty()) sb.append("\n").append(dec.sizeInfo());
+            int rendered = dec.renderedFrames();
+            sb.append("\n").append(Math.max(0, rendered - lastRendered)).append(" fps");
+            lastRendered = rendered;
         }
         showStatus(sb.toString());
     }

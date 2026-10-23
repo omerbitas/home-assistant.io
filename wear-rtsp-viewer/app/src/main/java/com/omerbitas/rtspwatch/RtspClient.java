@@ -423,7 +423,6 @@ final class RtspClient implements Runnable {
         boolean padding = (p[0] & 0x20) != 0;
         boolean extension = (p[0] & 0x10) != 0;
         int csrcCount = p[0] & 0x0F;
-        boolean marker = (p[1] & 0x80) != 0;
         long ts = ((long) (p[4] & 0xFF) << 24) | ((p[5] & 0xFF) << 16) | ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
 
         int offset = 12 + 4 * csrcCount;
@@ -436,14 +435,13 @@ final class RtspClient implements Runnable {
         if (padding) end -= p[length - 1] & 0xFF;
         if (offset >= end) return;
 
-
+        // Frames are split on timestamp changes only. Some cameras set the RTP marker bit on
+        // packets in the middle of a frame, which would hand the decoder partial frames.
         if (frameTimestamp != -1 && ts != frameTimestamp) emitFrame();
         frameTimestamp = ts;
 
         if (MIME_H264.equals(mime)) depacketizeH264(p, offset, end);
         else depacketizeH265(p, offset, end);
-
-        if (marker) emitFrame();
     }
 
     private void depacketizeH264(byte[] p, int offset, int end) {
