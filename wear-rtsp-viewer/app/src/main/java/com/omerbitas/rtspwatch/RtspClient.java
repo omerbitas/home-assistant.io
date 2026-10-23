@@ -66,6 +66,7 @@ final class RtspClient implements Runnable {
     private Map<String, String> digest;
     private boolean useGetParameter = false;
     private int videoChannel = 0;
+    private volatile int rtpPackets;
     private int nonceCount;
 
     // Depacketizer state.
@@ -74,9 +75,7 @@ final class RtspClient implements Runnable {
     private final ByteArrayOutputStream fragment = new ByteArrayOutputStream(256 * 1024);
     private boolean fragmentValid;
     private boolean frameKey;
-    private boolean frameValid = true;
     private long frameTimestamp = -1;
-    private int lastSeq = -1;
     private long firstRtpTs = -1;
     private long rtpTsBase; // unwrapped 32-bit timestamp
     private long lastRawTs = -1;
@@ -95,6 +94,11 @@ final class RtspClient implements Runnable {
             password = null;
             requestUrl = url;
         }
+    }
+
+    /** Number of video RTP packets received, for on-screen diagnostics. */
+    int rtpPackets() {
+        return rtpPackets;
     }
 
     void stop() {
@@ -400,7 +404,12 @@ final class RtspClient implements Runnable {
                 int channel = in.readUnsignedByte();
                 int length = in.readUnsignedShort();
                 in.readFully(packet, 0, length);
-                if (channel == videoChannel) handleRtp(packet, length);
+                // Only one track is set up, so every even (RTP, not RTCP) channel is our video.
+                // Some cameras ignore the channel numbers they announce in SETUP.
+                if (channel == videoChannel || channel % 2 == 0) {
+                    rtpPackets++;
+                    handleRtp(packet, length);
+                }
             } else if (b == 'R') {
                 // Interleaved RTSP response, e.g. to a keep-alive. Consume and ignore.
                 readLine();
@@ -415,7 +424,6 @@ final class RtspClient implements Runnable {
         boolean extension = (p[0] & 0x10) != 0;
         int csrcCount = p[0] & 0x0F;
         boolean marker = (p[1] & 0x80) != 0;
-        int seq = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
         long ts = ((long) (p[4] & 0xFF) << 24) | ((p[5] & 0xFF) << 16) | ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
 
         int offset = 12 + 4 * csrcCount;
@@ -428,12 +436,6 @@ final class RtspClient implements Runnable {
         if (padding) end -= p[length - 1] & 0xFF;
         if (offset >= end) return;
 
-        if (lastSeq != -1 && seq != ((lastSeq + 1) & 0xFFFF)) {
-            // Packet loss: drop the partially assembled frame and wait for the next one.
-            frameValid = false;
-            fragmentValid = false;
-        }
-        lastSeq = seq;
 
         if (frameTimestamp != -1 && ts != frameTimestamp) emitFrame();
         frameTimestamp = ts;
@@ -528,12 +530,11 @@ final class RtspClient implements Runnable {
     }
 
     private void emitFrame() {
-        if (frame.size() > 0 && frameValid) {
+        if (frame.size() > 0) {
             listener.onFrame(frame.toByteArray(), frame.size(), toUs(frameTimestamp), frameKey);
         }
         frame.reset();
         frameKey = false;
-        frameValid = true;
         frameTimestamp = -1;
     }
 

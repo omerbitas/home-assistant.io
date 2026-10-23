@@ -266,6 +266,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         if (pictureShown || client == null) return;
         StringBuilder sb = new StringBuilder(stage);
         if (!codecLabel.isEmpty()) sb.append("\n\n").append(codecLabel).append(" video");
+        if (client.rtpPackets() > 0) sb.append("\nPackets ").append(client.rtpPackets());
         if (frameCount > 0) {
             sb.append("\nReceived ").append(frameCount).append(" frames (")
                     .append(keyFrameCount).append(" key)");
