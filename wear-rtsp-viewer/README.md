@@ -8,8 +8,8 @@ A small, standalone Wear OS app for watching a live RTSP camera feed on a Samsun
 - Supports Basic and Digest camera logins (`rtsp://user:password@host:554/path`) and `rtsps://`
 - Connects the watch directly to Wi‑Fi while a stream is open (not through the phone's Bluetooth link)
 - Reconnects automatically if the stream drops
-- Tap the video to switch between fit and fill; swipe right to go back
-- Video only; audio isn't played
+- Plays the camera's sound (AAC or G.711); tap to mute/unmute, turn the bezel/crown for volume
+- Double-tap to switch between fit and fill, long-press for connection statistics, swipe right to go back
 
 A prebuilt APK is at [`release/RtspWatch.apk`](release/RtspWatch.apk).
 

@@ -1,6 +1,8 @@
 package com.omerbitas.rtspwatch;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
+import android.media.AudioManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -8,13 +10,20 @@ import android.net.NetworkRequest;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.GestureDetector;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
-/** Full-screen live view. Tap to switch between fit and fill; swipe right to go back. */
+/**
+ * Full-screen live view. Tap to mute/unmute, double-tap to switch between fit and fill, long-press
+ * for statistics, turn the bezel/crown for volume, swipe right to go back.
+ */
 public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     static final String EXTRA_URL = "url";
@@ -48,6 +57,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private RtspClient client;
     private Thread clientThread;
     private VideoDecoder decoder;
+    private volatile AudioPlayer audio;
+    private AudioManager audioManager;
+    private SharedPreferences prefs;
+    private boolean muted;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,28 +72,76 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         connectivity = getSystemService(ConnectivityManager.class);
         surfaceView.getHolder().addCallback(this);
 
-        View root = findViewById(R.id.root);
-        root.setOnClickListener(new View.OnClickListener() {
+        audioManager = getSystemService(AudioManager.class);
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        prefs = getSharedPreferences("player", MODE_PRIVATE);
+        muted = prefs.getBoolean("muted", false);
+
+        final GestureDetector gestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
-            public void onClick(View v) {
-                fill = !fill;
-                layoutVideo();
-            }
-        });
-        // Long-press shows/hides connection statistics over the video.
-        root.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                showStats = !showStats;
-                if (showStats) {
-                    handler.removeCallbacks(diagnosticsTicker);
-                    handler.post(diagnosticsTicker);
-                } else if (pictureShown) {
-                    showStatus(null);
-                }
+            public boolean onDown(MotionEvent e) {
                 return true;
             }
+
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                toggleMute();
+                return true;
+            }
+
+            @Override
+            public boolean onDoubleTap(MotionEvent e) {
+                fill = !fill;
+                layoutVideo();
+                return true;
+            }
+
+            @Override
+            public void onLongPress(MotionEvent e) {
+                toggleStats();
+            }
         });
+        findViewById(R.id.root).setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                return gestures.onTouchEvent(event);
+            }
+        });
+    }
+
+    /** The rotating bezel / crown adjusts the volume. */
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if (event.getAction() == MotionEvent.ACTION_SCROLL
+                && event.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
+            float delta = -event.getAxisValue(MotionEvent.AXIS_SCROLL);
+            if (delta != 0) {
+                if (muted && delta > 0) toggleMute();
+                audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                        delta > 0 ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
+                        AudioManager.FLAG_SHOW_UI);
+            }
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
+    }
+
+    private void toggleMute() {
+        muted = !muted;
+        prefs.edit().putBoolean("muted", muted).apply();
+        AudioPlayer a = audio;
+        if (a != null) a.setMuted(muted);
+        Toast.makeText(this, muted ? R.string.muted : R.string.unmuted, Toast.LENGTH_SHORT).show();
+    }
+
+    private void toggleStats() {
+        showStats = !showStats;
+        if (showStats) {
+            handler.removeCallbacks(diagnosticsTicker);
+            handler.post(diagnosticsTicker);
+        } else if (pictureShown) {
+            showStatus(null);
+        }
     }
 
     @Override
@@ -250,6 +311,21 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             }
 
             @Override
+            public void onAudioTrack(RtspClient.AudioInfo info) {
+                try {
+                    audio = new AudioPlayer(info, muted);
+                } catch (Exception e) {
+                    audio = null; // no sound, but keep the video going
+                }
+            }
+
+            @Override
+            public void onAudioFrame(byte[] data, int offset, int length) {
+                AudioPlayer a = audio;
+                if (a != null) a.feed(data, offset, length);
+            }
+
+            @Override
             public void onError(final Exception e) {
                 handler.post(new Runnable() {
                     @Override
@@ -300,6 +376,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             sb.append("\n").append(Math.max(0, rendered - lastRendered)).append(" fps");
             lastRendered = rendered;
         }
+        AudioPlayer a = audio;
+        if (a != null) sb.append("\nAudio ").append(a.describe());
         showStatus(sb.toString());
     }
 
@@ -328,6 +406,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         if (decoder != null) {
             decoder.release();
             decoder = null;
+        }
+        if (audio != null) {
+            audio.release();
+            audio = null;
         }
     }
 

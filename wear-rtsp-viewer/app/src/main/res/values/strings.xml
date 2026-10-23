@@ -11,4 +11,6 @@
     <string name="retrying">Retrying…</string>
     <!-- Optional stream added on first launch; build.sh fills it from DEFAULT_STREAM_URL. -->
     <string name="default_stream_url" translatable="false"></string>
+    <string name="muted">Sound off</string>
+    <string name="unmuted">Sound on</string>
 </resources>

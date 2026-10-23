@@ -26,7 +26,8 @@ import javax.net.ssl.SSLSocketFactory;
 /**
  * Minimal RTSP client: pulls the first H.264 or H.265 video track over RTP interleaved on the
  * RTSP TCP connection (works through NAT and doesn't need UDP ports), supports Basic and
- * Digest authentication, and hands complete access units to a {@link Listener}.
+ * Digest authentication, and hands complete access units to a {@link Listener}. If the stream
+ * also has AAC or G.711 audio, that track is set up too and its frames are passed on.
  */
 final class RtspClient implements Runnable {
 
@@ -39,7 +40,32 @@ final class RtspClient implements Runnable {
         /** A complete access unit in Annex-B format (start-code prefixed NAL units). */
         void onFrame(byte[] data, int length, long timestampUs, boolean keyFrame);
 
+        /** Called if the stream has a supported audio track. */
+        void onAudioTrack(AudioInfo info);
+
+        /** One encoded audio frame (an AAC access unit, or a chunk of G.711 samples). */
+        void onAudioFrame(byte[] data, int offset, int length);
+
         void onError(Exception e);
+    }
+
+    static final class AudioInfo {
+        static final String AAC = "AAC";
+        static final String PCMU = "PCMU";
+        static final String PCMA = "PCMA";
+
+        final String codec;
+        final int sampleRate;
+        final int channels;
+        /** AAC AudioSpecificConfig, null for G.711. */
+        final byte[] aacConfig;
+
+        AudioInfo(String codec, int sampleRate, int channels, byte[] aacConfig) {
+            this.codec = codec;
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            this.aacConfig = aacConfig;
+        }
     }
 
     static final String MIME_H264 = "video/avc";
@@ -66,6 +92,15 @@ final class RtspClient implements Runnable {
     private Map<String, String> digest;
     private boolean useGetParameter = false;
     private int videoChannel = 0;
+    private int audioChannel = -1;
+
+    // Audio track from the SDP, if any.
+    private AudioInfo audioInfo;
+    private String audioControl;
+    private boolean audioLatm;
+    private int auSizeLength = 13;
+    private int auIndexLength = 3;
+    private int auIndexDeltaLength = 3;
     private volatile int rtpPackets;
     private int nonceCount;
 
@@ -132,6 +167,8 @@ final class RtspClient implements Runnable {
             String sessionHeader = setup.headers.get("session");
             if (sessionHeader == null) throw new IOException("Camera did not return a session");
             session = sessionHeader.split(";")[0].trim();
+
+            if (audioInfo != null) setupAudio(baseUrl);
 
             request("PLAY", baseUrl, "Range: npt=0.000-\r\n");
             listener.onStatus("Waiting for video…");
@@ -324,6 +361,27 @@ final class RtspClient implements Runnable {
         }
     }
 
+    /** Audio is optional: if the camera refuses it, carry on with video only. */
+    private void setupAudio(String baseUrl) {
+        try {
+            Response r = request("SETUP", resolveControl(audioControl, baseUrl),
+                    "Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\n");
+            audioChannel = 2;
+            String transport = r.headers.get("transport");
+            if (transport != null) {
+                Matcher m = Pattern.compile("interleaved=(\\d+)").matcher(transport);
+                if (m.find()) audioChannel = Integer.parseInt(m.group(1));
+            }
+            if (audioChannel == videoChannel) {
+                audioChannel = -1;
+                return;
+            }
+            listener.onAudioTrack(audioInfo);
+        } catch (IOException e) {
+            audioChannel = -1;
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // SDP
 
@@ -331,12 +389,27 @@ final class RtspClient implements Runnable {
     private String parseVideoTrack(String sdp, String baseUrl) throws IOException {
         String[] lines = sdp.split("\r?\n");
         boolean inVideo = false;
+        boolean videoDone = false;
         String control = null;
         String fmtp = null;
+        java.util.List<String> audioSection = null;
+        boolean audioDone = false;
         for (String line : lines) {
             if (line.startsWith("m=")) {
-                if (inVideo && mime != null) break; // finished the video section we want
-                inVideo = line.startsWith("m=video");
+                if (inVideo && mime != null) videoDone = true; // finished the video section we want
+                if (audioSection != null && !audioDone) {
+                    audioDone = parseAudioSection(audioSection);
+                    audioSection = null;
+                }
+                inVideo = !videoDone && line.startsWith("m=video");
+                if (!audioDone && line.startsWith("m=audio")) {
+                    audioSection = new java.util.ArrayList<>();
+                    audioSection.add(line);
+                }
+                continue;
+            }
+            if (audioSection != null) {
+                audioSection.add(line);
                 continue;
             }
             if (!inVideo) continue;
@@ -350,24 +423,107 @@ final class RtspClient implements Runnable {
                 fmtp = line;
             }
         }
+        if (audioSection != null && !audioDone) parseAudioSection(audioSection);
         if (mime == null) {
             throw new IOException("No H.264/H.265 video in stream (try the camera's H.264 sub-stream)");
         }
         listener.onTrack(mime, parameterSetsFromFmtp(fmtp));
+        return resolveControl(control, baseUrl);
+    }
 
+    private static String resolveControl(String control, String baseUrl) {
         if (control == null || control.equals("*")) return baseUrl;
         if (control.toLowerCase(Locale.US).startsWith("rtsp")) return control;
         return baseUrl.endsWith("/") ? baseUrl + control : baseUrl + "/" + control;
     }
 
-    private byte[][] parameterSetsFromFmtp(String fmtp) {
-        if (fmtp == null) return new byte[0][];
+    /** Reads an m=audio section; returns true if it is a codec we can play. */
+    private boolean parseAudioSection(java.util.List<String> section) {
+        String[] media = section.get(0).split(" ");
+        String payloadType = media.length > 3 ? media[3] : "";
+        String encoding = null;
+        int rate = 8000;
+        int channels = 1;
+        String control = null;
+        Map<String, String> params = new HashMap<>();
+        for (String line : section) {
+            if (line.startsWith("a=rtpmap:" + payloadType + " ")) {
+                String[] enc = line.substring(line.indexOf(' ') + 1).trim().split("/");
+                encoding = enc[0].toUpperCase(Locale.US);
+                if (enc.length > 1) rate = parseInt(enc[1], rate);
+                if (enc.length > 2) channels = parseInt(enc[2], channels);
+            } else if (line.startsWith("a=control:")) {
+                control = line.substring("a=control:".length()).trim();
+            } else if (line.startsWith("a=fmtp:")) {
+                params = fmtpParams(line);
+            }
+        }
+        if (encoding == null) {
+            if (payloadType.equals("0")) encoding = AudioInfo.PCMU;
+            else if (payloadType.equals("8")) encoding = AudioInfo.PCMA;
+            else return false;
+        }
+
+        AudioInfo info;
+        if (encoding.equals("PCMU") || encoding.equals("PCMA")) {
+            info = new AudioInfo(encoding, rate, channels, null);
+        } else if (encoding.equals("MPEG4-GENERIC")) {
+            auSizeLength = parseInt(params.get("sizelength"), 13);
+            auIndexLength = parseInt(params.get("indexlength"), 3);
+            auIndexDeltaLength = parseInt(params.get("indexdeltalength"), 3);
+            byte[] config = params.containsKey("config") ? hex(params.get("config")) : null;
+            info = new AudioInfo(AudioInfo.AAC, rate, channels,
+                    config != null ? config : AacConfig.build(2, rate, channels));
+        } else if (encoding.equals("MP4A-LATM")) {
+            if ("1".equals(params.get("cpresent"))) return false; // in-band config: not supported
+            byte[] config = params.containsKey("config")
+                    ? AacConfig.fromStreamMuxConfig(hex(params.get("config")), rate, channels)
+                    : AacConfig.build(2, rate, channels);
+            if (config == null) return false;
+            audioLatm = true;
+            info = new AudioInfo(AudioInfo.AAC, rate, channels, config);
+        } else {
+            return false;
+        }
+        audioInfo = info;
+        audioControl = control;
+        return true;
+    }
+
+    private static int parseInt(String s, int fallback) {
+        try {
+            return s != null ? Integer.parseInt(s.trim()) : fallback;
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static byte[] hex(String s) {
+        s = s.trim();
+        if (s.length() % 2 != 0) return null;
+        byte[] out = new byte[s.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            int hi = Character.digit(s.charAt(2 * i), 16);
+            int lo = Character.digit(s.charAt(2 * i + 1), 16);
+            if (hi < 0 || lo < 0) return null;
+            out[i] = (byte) ((hi << 4) | lo);
+        }
+        return out;
+    }
+
+    private static Map<String, String> fmtpParams(String fmtp) {
         Map<String, String> params = new HashMap<>();
         String body = fmtp.substring(fmtp.indexOf(' ') + 1);
         for (String part : body.split(";")) {
             int eq = part.indexOf('=');
             if (eq > 0) params.put(part.substring(0, eq).trim().toLowerCase(Locale.US), part.substring(eq + 1).trim());
         }
+        return params;
+    }
+
+    private byte[][] parameterSetsFromFmtp(String fmtp) {
+        if (fmtp == null) return new byte[0][];
+        Map<String, String> params = fmtpParams(fmtp);
         StringBuilder all = new StringBuilder();
         if (MIME_H264.equals(mime)) {
             if (params.containsKey("sprop-parameter-sets")) all.append(params.get("sprop-parameter-sets"));
@@ -404,9 +560,11 @@ final class RtspClient implements Runnable {
                 int channel = in.readUnsignedByte();
                 int length = in.readUnsignedShort();
                 in.readFully(packet, 0, length);
-                // Only one track is set up, so every even (RTP, not RTCP) channel is our video.
-                // Some cameras ignore the channel numbers they announce in SETUP.
-                if (channel == videoChannel || channel % 2 == 0) {
+                // Every even (RTP, not RTCP) channel that isn't audio is our video: some cameras
+                // ignore the channel numbers they announce in SETUP.
+                if (channel == audioChannel) {
+                    handleAudioRtp(packet, length);
+                } else if (channel == videoChannel || channel % 2 == 0) {
                     rtpPackets++;
                     handleRtp(packet, length);
                 }
@@ -416,6 +574,60 @@ final class RtspClient implements Runnable {
                 readHeadersAndBody(new Response());
             }
         }
+    }
+
+    private void handleAudioRtp(byte[] p, int length) {
+        if (length < 12 || (p[0] & 0xC0) != 0x80) return;
+        int offset = 12 + 4 * (p[0] & 0x0F);
+        if ((p[0] & 0x10) != 0) {
+            if (offset + 4 > length) return;
+            offset += 4 + 4 * (((p[offset + 2] & 0xFF) << 8) | (p[offset + 3] & 0xFF));
+        }
+        int end = length;
+        if ((p[0] & 0x20) != 0) end -= p[length - 1] & 0xFF;
+        if (offset >= end) return;
+
+        if (audioInfo.aacConfig == null) { // G.711: the payload is raw samples
+            listener.onAudioFrame(p, offset, end - offset);
+        } else if (audioLatm) {
+            // PayloadLengthInfo (sum of bytes up to the first one below 255), then the frame.
+            while (offset < end) {
+                int size = 0;
+                int b;
+                do {
+                    b = p[offset++] & 0xFF;
+                    size += b;
+                } while (b == 255 && offset < end);
+                if (size == 0 || offset + size > end) break;
+                listener.onAudioFrame(p, offset, size);
+                offset += size;
+            }
+        } else {
+            // RFC 3640: AU-headers-length in bits, AU headers, then the access units.
+            if (offset + 2 > end) return;
+            int headerBits = ((p[offset] & 0xFF) << 8) | (p[offset + 1] & 0xFF);
+            int headerStart = offset + 2;
+            int data = headerStart + (headerBits + 7) / 8;
+            int bit = 0;
+            boolean first = true;
+            while (bit + auSizeLength <= headerBits && data <= end) {
+                int size = readBits(p, headerStart, bit, auSizeLength);
+                bit += auSizeLength + (first ? auIndexLength : auIndexDeltaLength);
+                first = false;
+                if (size <= 0 || data + size > end) break; // fragmented AU: skip
+                listener.onAudioFrame(p, data, size);
+                data += size;
+            }
+        }
+    }
+
+    private static int readBits(byte[] p, int byteOffset, int bitOffset, int count) {
+        int value = 0;
+        for (int i = 0; i < count; i++) {
+            int pos = bitOffset + i;
+            value = (value << 1) | ((p[byteOffset + (pos >> 3)] >> (7 - (pos & 7))) & 1);
+        }
+        return value;
     }
 
     private void handleRtp(byte[] p, int length) {
