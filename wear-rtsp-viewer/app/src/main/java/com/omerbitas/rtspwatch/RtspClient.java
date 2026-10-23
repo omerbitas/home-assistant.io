@@ -90,7 +90,9 @@ final class RtspClient implements Runnable {
     private DataInputStream in;
     private OutputStream out;
     private int cseq = 1;
-    private String session;
+    private volatile String session;
+    private volatile String teardownUrl;
+    private final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
     private String authHeader; // "Basic" or parsed Digest challenge
     private Map<String, String> digest;
     private boolean useGetParameter = false;
@@ -149,15 +151,30 @@ final class RtspClient implements Runnable {
         return rtpPackets;
     }
 
+    /**
+     * Stops streaming. Sends TEARDOWN first so the camera frees the session straight away: many
+     * cameras only allow one or two connections, and an abandoned session can block the next one
+     * until it times out. Runs on its own thread because callers may be on the main thread.
+     */
     void stop() {
         running = false;
-        Socket s = socket;
-        if (s != null) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
+        final Socket s = socket;
+        if (s == null || stopped.getAndSet(true)) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                if (session != null && teardownUrl != null) {
+                    try {
+                        sendRequest("TEARDOWN", teardownUrl, "");
+                    } catch (IOException | RuntimeException ignored) {
+                    }
+                }
+                try {
+                    s.close();
+                } catch (IOException ignored) {
+                }
             }
-        }
+        }, "rtsp-teardown").start();
     }
 
     @Override
@@ -168,6 +185,7 @@ final class RtspClient implements Runnable {
             listener.onStatus("Logging in…");
             String sdp = request("DESCRIBE", requestUrl, "Accept: application/sdp\r\n").body;
             String baseUrl = lastContentBase != null ? lastContentBase : requestUrl;
+            teardownUrl = baseUrl;
             String control = parseVideoTrack(sdp, baseUrl);
 
             Response setup = request("SETUP", control,

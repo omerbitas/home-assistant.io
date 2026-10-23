@@ -36,8 +36,9 @@ import javax.net.SocketFactory;
 /**
  * Wear OS tile showing a recent still picture from the camera; tapping it opens the live view.
  *
- * <p>Tiles can't play video, so while the tile is on screen this keeps grabbing a fresh frame and
- * asks the system to redraw (the system decides how often that is allowed). When the tile isn't
+ * <p>Tiles can't play video, so while the tile is on screen this keeps one camera connection open,
+ * takes a frame every couple of seconds and asks the system to redraw (the system decides how often
+ * that is allowed). Nothing connects while the live view is open, so it gets the camera to itself. When the tile isn't
  * visible it refreshes at most every 30 seconds, and only when the system asks for the tile.
  *
  * <p>The AndroidX Tiles library isn't used (to keep the app dependency-free), so this speaks the
@@ -71,8 +72,10 @@ public class CameraTileService extends Service {
     private static final int SNAPSHOT_WIDTH = 320;
     private static final long SNAPSHOT_TIMEOUT_MS = 10000;
     private static final long WIFI_TIMEOUT_MS = 4000;
-    /** Pause between grabs while the tile is on screen. */
+    /** Time between pictures while the tile is on screen. */
     private static final long VISIBLE_INTERVAL_MS = 2000;
+    /** Pause before reconnecting after a failure while the tile is on screen. */
+    private static final long RETRY_DELAY_MS = 5000;
     /** Stop refreshing if the system never reports that the tile was left. */
     private static final long VISIBLE_MAX_MS = 3 * 60 * 1000;
     /**
@@ -92,6 +95,8 @@ public class CameraTileService extends Service {
     private static long lastGrabStart;
     private static boolean lastGrabFailed;
     private static Handler worker;
+    private static Snapshot.Feed feed;
+    private static WifiRequest feedNetwork;
 
     private final Binder binder = new Binder() {
         @Override
@@ -133,6 +138,7 @@ public class CameraTileService extends Service {
                     if (visible) visibleSince = System.currentTimeMillis();
                 }
                 if (code == ON_TILE_ENTER) maybeRefresh(getApplicationContext());
+                else stopFeed();
                 return true;
             }
             if (code >= FIRST_CALL_TRANSACTION && code <= LAST_CALL_TRANSACTION) {
@@ -202,11 +208,13 @@ public class CameraTileService extends Service {
     private static void maybeRefresh(final Context context) {
         Snapshot current = latest(context);
         long now = System.currentTimeMillis();
-        long delay;
         synchronized (LOCK) {
-            if (grabbing) return;
-            if (visible && now - visibleSince < VISIBLE_MAX_MS) {
-                delay = Math.max(0, lastGrabStart + VISIBLE_INTERVAL_MS - now);
+            // The live view gets the camera to itself: many cameras only allow one or two connections.
+            if (PlayerActivity.isActive() || grabbing || feed != null) return;
+            final boolean onScreen = visible && now - visibleSince < VISIBLE_MAX_MS;
+            long delay;
+            if (onScreen) {
+                delay = Math.max(0, lastGrabStart + RETRY_DELAY_MS - now);
             } else if ((current == null || now - current.timeMillis > BACKGROUND_INTERVAL_MS)
                     && now - lastGrabStart > BACKGROUND_INTERVAL_MS) {
                 delay = 0;
@@ -219,40 +227,91 @@ public class CameraTileService extends Service {
                 thread.start();
                 worker = new Handler(thread.getLooper());
             }
+            worker.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (onScreen) startFeed(context);
+                    else grabOnce(context);
+                }
+            }, delay);
         }
-        worker.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                refresh(context);
-            }
-        }, delay);
     }
 
-    /** Runs on the worker thread: grab one frame, then ask the system to redraw the tile. */
-    private static void refresh(Context context) {
+    /** Stops the on-screen feed, e.g. when the tile is left or the live view opens. */
+    static void stopFeed() {
+        synchronized (LOCK) {
+            if (feed != null) {
+                feed.stop();
+                feed = null;
+            }
+            if (feedNetwork != null) {
+                feedNetwork.release();
+                feedNetwork = null;
+            }
+        }
+    }
+
+    /** Runs on the worker thread: keeps one connection open and refreshes the tile from it. */
+    private static void startFeed(final Context context) {
+        synchronized (LOCK) {
+            lastGrabStart = System.currentTimeMillis();
+        }
+        List<StreamStore.Stream> streams = new StreamStore(context).load();
+        if (streams.isEmpty()) {
+            synchronized (LOCK) {
+                grabbing = false;
+            }
+            return;
+        }
+        WifiRequest wifi = WifiRequest.await(context);
+        synchronized (LOCK) {
+            grabbing = false;
+            if (!visible || PlayerActivity.isActive()) {
+                wifi.release();
+                return;
+            }
+            feedNetwork = wifi;
+            feed = new Snapshot.Feed(streams.get(0).url, wifi.socketFactory(), SNAPSHOT_WIDTH, VISIBLE_INTERVAL_MS,
+                    new Snapshot.Feed.Callback() {
+                        @Override
+                        public void onSnapshot(Snapshot snapshot) {
+                            snapshot.save(snapshotFile(context));
+                            boolean keepGoing;
+                            synchronized (LOCK) {
+                                remember(snapshot);
+                                lastGrabFailed = false;
+                                keepGoing = visible && !PlayerActivity.isActive()
+                                        && System.currentTimeMillis() - visibleSince < VISIBLE_MAX_MS;
+                            }
+                            if (!keepGoing) stopFeed();
+                            requestUpdate(context);
+                        }
+
+                        @Override
+                        public void onError(Exception e) {
+                            synchronized (LOCK) {
+                                lastGrabFailed = true;
+                            }
+                            stopFeed();
+                            requestUpdate(context);
+                            maybeRefresh(context); // retries after a pause while still on screen
+                        }
+                    });
+        }
+    }
+
+    /** Runs on the worker thread: one connection, one picture, then ask the system to redraw. */
+    private static void grabOnce(Context context) {
         synchronized (LOCK) {
             lastGrabStart = System.currentTimeMillis();
         }
         boolean failed = true;
         List<StreamStore.Stream> streams = new StreamStore(context).load();
         if (!streams.isEmpty()) {
-            ConnectivityManager connectivity = context.getSystemService(ConnectivityManager.class);
-            final Network[] wifi = new Network[1];
-            final CountDownLatch ready = new CountDownLatch(1);
-            ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
-                @Override
-                public void onAvailable(Network network) {
-                    wifi[0] = network;
-                    ready.countDown();
-                }
-            };
+            WifiRequest wifi = WifiRequest.await(context);
             try {
-                // Like the live view: use Wi-Fi directly rather than the Bluetooth link to the phone.
-                connectivity.requestNetwork(new NetworkRequest.Builder()
-                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), callback);
-                ready.await(WIFI_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                SocketFactory factory = wifi[0] != null ? wifi[0].getSocketFactory() : null;
-                Snapshot snapshot = Snapshot.grab(streams.get(0).url, factory, SNAPSHOT_WIDTH, SNAPSHOT_TIMEOUT_MS);
+                Snapshot snapshot = Snapshot.grab(streams.get(0).url, wifi.socketFactory(), SNAPSHOT_WIDTH,
+                        SNAPSHOT_TIMEOUT_MS);
                 snapshot.save(snapshotFile(context));
                 synchronized (LOCK) {
                     remember(snapshot);
@@ -261,10 +320,7 @@ public class CameraTileService extends Service {
             } catch (Exception e) {
                 // Keep showing the previous picture, marked as offline.
             } finally {
-                try {
-                    connectivity.unregisterNetworkCallback(callback);
-                } catch (RuntimeException ignored) {
-                }
+                wifi.release();
             }
         }
         synchronized (LOCK) {
@@ -272,7 +328,48 @@ public class CameraTileService extends Service {
             grabbing = false;
         }
         requestUpdate(context);
-        maybeRefresh(context); // keeps going while the tile is on screen
+        maybeRefresh(context); // switches to the live feed if the tile came on screen meanwhile
+    }
+
+    /** Like the live view: use Wi-Fi directly rather than the Bluetooth link to the phone. */
+    private static final class WifiRequest extends ConnectivityManager.NetworkCallback {
+        private final ConnectivityManager connectivity;
+        private final CountDownLatch ready = new CountDownLatch(1);
+        private volatile Network network;
+
+        private WifiRequest(Context context) {
+            connectivity = context.getSystemService(ConnectivityManager.class);
+        }
+
+        static WifiRequest await(Context context) {
+            WifiRequest request = new WifiRequest(context);
+            try {
+                request.connectivity.requestNetwork(new NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), request);
+                request.ready.await(WIFI_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException | RuntimeException ignored) {
+            }
+            return request;
+        }
+
+        @Override
+        public void onAvailable(Network network) {
+            this.network = network;
+            ready.countDown();
+        }
+
+        /** Wi-Fi if it came up in time, otherwise the default network. */
+        SocketFactory socketFactory() {
+            Network n = network;
+            return n != null ? n.getSocketFactory() : null;
+        }
+
+        void release() {
+            try {
+                connectivity.unregisterNetworkCallback(this);
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
     /** Asks the system tile renderer to call onTileRequest again (it may rate-limit this). */

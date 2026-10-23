@@ -108,6 +108,80 @@ final class Snapshot {
         return decode(mime[0], parameterSets[0], got, maxWidth);
     }
 
+    /**
+     * Keeps one camera connection open and produces a snapshot every {@code intervalMs} (at the
+     * next key frame), instead of reconnecting for each picture.
+     */
+    static final class Feed {
+
+        interface Callback {
+            void onSnapshot(Snapshot snapshot);
+
+            void onError(Exception e);
+        }
+
+        private final RtspClient client;
+        private final List<byte[]> frames = new ArrayList<>();
+        private String mime;
+        private byte[][] parameterSets;
+        private boolean collecting;
+        private long lastSnapshot;
+
+        Feed(String url, SocketFactory network, final int maxWidth, final long intervalMs, final Callback callback) {
+            client = new RtspClient(url, new RtspClient.Listener() {
+                @Override
+                public void onStatus(String status) {
+                }
+
+                @Override
+                public void onTrack(String m, byte[][] sets) {
+                    mime = m;
+                    parameterSets = sets;
+                }
+
+                @Override
+                public void onFrame(byte[] data, int length, long timestampUs, boolean keyFrame) {
+                    if (!collecting) {
+                        if (!keyFrame || System.currentTimeMillis() - lastSnapshot < intervalMs) return;
+                        collecting = true;
+                        frames.clear();
+                    }
+                    byte[] copy = new byte[length];
+                    System.arraycopy(data, 0, copy, 0, length);
+                    frames.add(copy);
+                    if (frames.size() < FRAMES_TO_DECODE) return;
+                    collecting = false;
+                    lastSnapshot = System.currentTimeMillis();
+                    try {
+                        // Decoding on the RTSP thread briefly pauses reading; TCP buffers the gap.
+                        callback.onSnapshot(decode(mime, parameterSets, frames, maxWidth));
+                    } catch (Exception e) {
+                        client.stop();
+                        callback.onError(e);
+                    }
+                }
+
+                @Override
+                public void onAudioTrack(RtspClient.AudioInfo info) {
+                }
+
+                @Override
+                public void onAudioFrame(byte[] data, int offset, int length) {
+                }
+
+                @Override
+                public void onError(Exception e) {
+                    callback.onError(e);
+                }
+            }, false, network);
+            new Thread(client, "tile-feed").start();
+        }
+
+        void stop() {
+            client.stop();
+        }
+    }
+
     private static Snapshot decode(String mime, byte[][] sdpSets, List<byte[]> frames, int maxWidth)
             throws IOException {
         Exception last = null;

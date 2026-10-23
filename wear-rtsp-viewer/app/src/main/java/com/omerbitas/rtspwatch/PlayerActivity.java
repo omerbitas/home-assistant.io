@@ -147,9 +147,18 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
+    private static volatile boolean active;
+
+    /** True while the live view is on screen; the tile then leaves the camera alone. */
+    static boolean isActive() {
+        return active;
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
+        active = true;
+        CameraTileService.stopFeed();
         started = true;
         requestWifi();
     }
@@ -157,6 +166,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onStop() {
         super.onStop();
+        active = false;
         started = false;
         networkReady = false;
         handler.removeCallbacksAndMessages(null);
