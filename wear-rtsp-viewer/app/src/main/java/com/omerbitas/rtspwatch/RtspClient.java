@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.net.SocketFactory;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
@@ -81,6 +82,8 @@ final class RtspClient implements Runnable {
     private final String username;
     private final String password;
     private final Listener listener;
+    private final boolean withAudio;
+    private final SocketFactory socketFactory;
 
     private volatile boolean running = true;
     private Socket socket;
@@ -116,8 +119,18 @@ final class RtspClient implements Runnable {
     private long lastRawTs = -1;
 
     RtspClient(String url, Listener listener) {
+        this(url, listener, true, null);
+    }
+
+    /**
+     * @param withAudio whether to set up the audio track too
+     * @param socketFactory network to connect through, or null for the process default
+     */
+    RtspClient(String url, Listener listener, boolean withAudio, SocketFactory socketFactory) {
         this.uri = Uri.parse(url);
         this.listener = listener;
+        this.withAudio = withAudio;
+        this.socketFactory = socketFactory;
         String userInfo = uri.getEncodedUserInfo();
         if (userInfo != null) {
             int colon = userInfo.indexOf(':');
@@ -168,7 +181,7 @@ final class RtspClient implements Runnable {
             if (sessionHeader == null) throw new IOException("Camera did not return a session");
             session = sessionHeader.split(";")[0].trim();
 
-            if (audioInfo != null) setupAudio(baseUrl);
+            if (withAudio && audioInfo != null) setupAudio(baseUrl);
 
             request("PLAY", baseUrl, "Range: npt=0.000-\r\n");
             listener.onStatus("Waiting for video…");
@@ -183,7 +196,8 @@ final class RtspClient implements Runnable {
     private void connect() throws IOException {
         boolean tls = "rtsps".equalsIgnoreCase(uri.getScheme());
         int port = uri.getPort() != -1 ? uri.getPort() : (tls ? 322 : 554);
-        Socket s = tls ? SSLSocketFactory.getDefault().createSocket() : new Socket();
+        Socket s = tls ? SSLSocketFactory.getDefault().createSocket()
+                : socketFactory != null ? socketFactory.createSocket() : new Socket();
         socket = s;
         s.setTcpNoDelay(true);
         s.setReceiveBufferSize(1024 * 1024);

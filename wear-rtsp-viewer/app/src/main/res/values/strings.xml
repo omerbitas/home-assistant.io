@@ -14,7 +14,8 @@
     <string name="muted">Sound off</string>
     <string name="unmuted">Sound on</string>
     <string name="tile_label">Camera</string>
-    <string name="tile_title">Camera</string>
-    <string name="tile_button">Watch live</string>
+    <string name="tile_loading">Loading…</string>
+    <string name="tile_offline">Offline</string>
+    <string name="tile_no_stream">Add a camera in the app</string>
     <string name="tap_for_sound">Tap for sound</string>
 </resources>
