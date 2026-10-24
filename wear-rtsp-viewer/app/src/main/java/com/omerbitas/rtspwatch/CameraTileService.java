@@ -39,7 +39,8 @@ import javax.net.SocketFactory;
  * <p>Tiles can't play video, so while the tile is on screen this keeps one camera connection open,
  * takes a frame every couple of seconds and asks the system to redraw (the system decides how often
  * that is allowed). Nothing connects while the live view is open, so it gets the camera to itself. When the tile isn't
- * visible it refreshes at most every 30 seconds, and only when the system asks for the tile.
+ * visible it refreshes at most every 10 minutes, only when the system asks for the tile, and without
+ * switching Wi-Fi on.
  *
  * <p>The AndroidX Tiles library isn't used (to keep the app dependency-free), so this speaks the
  * tile binder protocol directly. It mirrors the AIDL interfaces in androidx.wear.tiles
@@ -77,12 +78,12 @@ public class CameraTileService extends Service {
     /** Pause before reconnecting after a failure while the tile is on screen. */
     private static final long RETRY_DELAY_MS = 5000;
     /** Stop refreshing if the system never reports that the tile was left. */
-    private static final long VISIBLE_MAX_MS = 3 * 60 * 1000;
+    private static final long VISIBLE_MAX_MS = 60 * 1000;
     /**
-     * Refresh interval when the tile is requested but not known to be on screen. Also used as the
-     * tile's freshness interval, so the system asks again when it shows a stale tile.
+     * When the system asks for the tile but it isn't known to be on screen, refresh at most this
+     * often, without switching on Wi-Fi (battery: this used to run every 30 s all day).
      */
-    private static final long BACKGROUND_INTERVAL_MS = 30 * 1000;
+    private static final long BACKGROUND_INTERVAL_MS = 10 * 60 * 1000;
 
     // Shared state: the system binds and unbinds the service often, so keep it static.
     private static final Object LOCK = new Object();
@@ -327,7 +328,7 @@ public class CameraTileService extends Service {
         boolean failed = true;
         List<StreamStore.Stream> streams = new StreamStore(context).load();
         if (!streams.isEmpty()) {
-            WifiRequest wifi = WifiRequest.await(context);
+            WifiRequest wifi = WifiRequest.current(context); // background: don't switch Wi-Fi on
             HomeAssistant homeAssistant = HomeAssistant.fromResources(context);
             try {
                 Snapshot snapshot;
@@ -406,6 +407,15 @@ public class CameraTileService extends Service {
 
         private WifiRequest(Context context) {
             connectivity = context.getSystemService(ConnectivityManager.class);
+        }
+
+        /** The Wi-Fi network if the watch happens to be on Wi-Fi already; never switches it on. */
+        static WifiRequest current(Context context) {
+            WifiRequest request = new WifiRequest(context);
+            Network active = request.connectivity.getActiveNetwork();
+            NetworkCapabilities caps = active != null ? request.connectivity.getNetworkCapabilities(active) : null;
+            if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) request.network = active;
+            return request;
         }
 
         static WifiRequest await(Context context) {
@@ -556,7 +566,6 @@ public class CameraTileService extends Service {
                 .string(1, resourcesVersion)
                 .message(2, timeline)
                 .message(3, new Proto().varint(1, 1).varint(2, 0)) // schema 1.0
-                .varint(4, BACKGROUND_INTERVAL_MS) // freshness_interval_millis
                 .bytes();
     }
 

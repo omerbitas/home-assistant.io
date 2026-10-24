@@ -24,4 +24,5 @@
     <string name="ha_camera" translatable="false"></string>
     <string name="away_mode">Away from home: via Home Assistant</string>
     <string name="sound_home_only">Sound is only available at home</string>
+    <string name="paused">Paused to save battery.\nTap to continue.</string>
 </resources>

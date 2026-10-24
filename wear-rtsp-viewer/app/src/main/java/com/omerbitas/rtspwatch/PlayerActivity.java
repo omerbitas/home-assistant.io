@@ -31,6 +31,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     private static final long WIFI_TIMEOUT_MS = 10000;
     private static final long RETRY_DELAY_MS = 3000;
+    private static final long IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SurfaceView surfaceView;
@@ -68,6 +69,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private volatile AudioPlayer audio;
     private AudioManager audioManager;
     private boolean muted = true;
+    private boolean paused;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,7 +94,11 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
             @Override
             public boolean onSingleTapConfirmed(MotionEvent e) {
-                toggleMute();
+                if (paused) {
+                    resume();
+                } else {
+                    toggleMute();
+                }
                 return true;
             }
 
@@ -118,6 +124,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         findViewById(R.id.root).setOnTouchListener(new View.OnTouchListener() {
             @Override
             public boolean onTouch(View v, MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) restartIdleTimer();
                 return gestures.onTouchEvent(event);
             }
         });
@@ -139,6 +146,36 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         if (muted && up) toggleMute();
         audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
                 up ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+    }
+
+    /**
+     * Streaming keeps the screen and radio busy, so after a while without a touch the live view
+     * pauses itself (e.g. when the watch is left showing the camera).
+     */
+    private void restartIdleTimer() {
+        handler.removeCallbacks(idleTimeout);
+        if (!paused) handler.postDelayed(idleTimeout, IDLE_TIMEOUT_MS);
+    }
+
+    private final Runnable idleTimeout = new Runnable() {
+        @Override
+        public void run() {
+            paused = true;
+            stopSession();
+            releaseNetwork(); // lets the watch switch Wi-Fi off again
+            networkReady = false;
+            showStatus(getString(R.string.paused));
+            findViewById(R.id.root).setKeepScreenOn(false);
+        }
+    };
+
+    private void resume() {
+        paused = false;
+        findViewById(R.id.root).setKeepScreenOn(true);
+        restartIdleTimer();
+        onWifi = false;
+        directFailures = 0;
+        requestWifi(); // starts the stream once a network is ready
     }
 
     private void toggleMute() {
@@ -177,6 +214,9 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         started = true;
         onWifi = false;
         directFailures = 0;
+        paused = false;
+        findViewById(R.id.root).setKeepScreenOn(true);
+        restartIdleTimer();
         requestWifi();
     }
 
@@ -274,7 +314,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     // Streaming
 
     private void startSession() {
-        if (!started || !networkReady || surface == null || client != null || awayStream != null) return;
+        if (!started || paused || !networkReady || surface == null || client != null || awayStream != null) return;
         // The camera's LAN address only works on Wi-Fi; otherwise (or if it failed) use Home Assistant.
         if (homeAssistant != null && (!onWifi || directFailures > 0)) {
             startAwaySession();
