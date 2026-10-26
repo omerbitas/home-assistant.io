@@ -32,6 +32,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private static final long WIFI_TIMEOUT_MS = 10000;
     private static final long RETRY_DELAY_MS = 3000;
     private static final long IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+    private static final int MAX_FAILURES = 3;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SurfaceView surfaceView;
@@ -70,6 +71,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private AudioManager audioManager;
     private boolean muted = true;
     private boolean paused;
+    private int failuresWithoutPicture;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -160,14 +162,34 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private final Runnable idleTimeout = new Runnable() {
         @Override
         public void run() {
-            paused = true;
-            stopSession();
-            releaseNetwork(); // lets the watch switch Wi-Fi off again
-            networkReady = false;
-            showStatus(getString(R.string.paused));
-            findViewById(R.id.root).setKeepScreenOn(false);
+            pause(getString(R.string.paused));
         }
     };
+
+    /** Stops streaming and waits for a tap, showing why. */
+    private void pause(String reason) {
+        paused = true;
+        handler.removeCallbacks(idleTimeout);
+        stopSession();
+        releaseNetwork(); // lets the watch switch Wi-Fi off again
+        networkReady = false;
+        showStatus(reason);
+        findViewById(R.id.root).setKeepScreenOn(false);
+    }
+
+    /**
+     * After a few failed attempts in a row without any picture (typically away from home, where the
+     * camera's LAN address can't be reached), stop retrying instead of draining the battery.
+     */
+    private void onSessionFailed(String message) {
+        if (++failuresWithoutPicture >= MAX_FAILURES) {
+            pause(getString(R.string.unreachable));
+            return;
+        }
+        showStatus(message + "\n" + getString(R.string.retrying));
+        stopSession();
+        handler.postDelayed(retry, RETRY_DELAY_MS);
+    }
 
     private void resume() {
         paused = false;
@@ -175,6 +197,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         restartIdleTimer();
         onWifi = false;
         directFailures = 0;
+        failuresWithoutPicture = 0;
         requestWifi(); // starts the stream once a network is ready
     }
 
@@ -214,6 +237,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         started = true;
         onWifi = false;
         directFailures = 0;
+        failuresWithoutPicture = 0;
         paused = false;
         findViewById(R.id.root).setKeepScreenOn(true);
         restartIdleTimer();
@@ -349,6 +373,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     public void run() {
                         if (decoder != decRef[0]) return;
                         pictureShown = true;
+                        failuresWithoutPicture = 0;
                         if (!showStats) showStatus(null);
                         if (muted && audio != null) {
                             Toast.makeText(PlayerActivity.this, R.string.tap_for_sound, Toast.LENGTH_SHORT).show();
@@ -413,9 +438,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                         if (client != self[0]) return; // stale session
                         directFailures++;
                         String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                        showStatus(message + "\n" + getString(R.string.retrying));
-                        stopSession();
-                        handler.postDelayed(retry, RETRY_DELAY_MS);
+                        onSessionFailed(message);
                     }
                 });
             }
@@ -443,6 +466,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                         awayView.setImageBitmap(frame);
                         if (!pictureShown) {
                             pictureShown = true;
+                        failuresWithoutPicture = 0;
                             if (!showStats) showStatus(null);
                         }
                     }
@@ -456,9 +480,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     public void run() {
                         if (awayStream != self[0]) return;
                         String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                        showStatus(message + "\n" + getString(R.string.retrying));
-                        stopSession();
-                        handler.postDelayed(retry, RETRY_DELAY_MS);
+                        onSessionFailed(message);
                     }
                 });
             }
