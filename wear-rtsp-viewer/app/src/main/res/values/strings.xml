@@ -26,4 +26,5 @@
     <string name="sound_home_only">Sound is only available at home</string>
     <string name="paused">Paused to save battery.\nTap to continue.</string>
     <string name="unreachable">Can\'t reach the camera.\nAway from home?\nTap to try again.</string>
+    <string name="unreachable_away">Can\'t show the camera via Home Assistant.\nTap to try again.</string>
 </resources>

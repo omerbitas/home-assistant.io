@@ -20,7 +20,8 @@ import java.util.Locale;
  */
 final class HomeAssistant {
 
-    private static final int TIMEOUT_MS = 10000;
+    private static final int TIMEOUT_MS = 15000;
+    private static final int STREAM_READ_TIMEOUT_MS = 25000;
 
     final String baseUrl;
     final String token;
@@ -111,6 +112,7 @@ final class HomeAssistant {
             try {
                 // The picture rate is the camera's frame rate setting in Home Assistant (often 2/s).
                 HttpURLConnection c = open("/api/camera_proxy_stream/" + camera);
+                c.setReadTimeout(STREAM_READ_TIMEOUT_MS); // the first picture can take a while
                 connection = c;
                 if (!running) {
                     stop();

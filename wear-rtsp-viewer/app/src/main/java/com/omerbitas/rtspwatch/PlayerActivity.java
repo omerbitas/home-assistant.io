@@ -72,6 +72,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private boolean muted = true;
     private boolean paused;
     private int failuresWithoutPicture;
+    private boolean awayStarted;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -183,7 +184,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
      */
     private void onSessionFailed(String message) {
         if (++failuresWithoutPicture >= MAX_FAILURES) {
-            pause(getString(R.string.unreachable));
+            // Keep the last error visible: it says what actually went wrong.
+            pause(getString(awayStarted ? R.string.unreachable_away : R.string.unreachable) + "\n\n" + message);
             return;
         }
         showStatus(message + "\n" + getString(R.string.retrying));
@@ -198,6 +200,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         onWifi = false;
         directFailures = 0;
         failuresWithoutPicture = 0;
+        awayStarted = false;
         requestWifi(); // starts the stream once a network is ready
     }
 
@@ -238,6 +241,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         onWifi = false;
         directFailures = 0;
         failuresWithoutPicture = 0;
+        awayStarted = false;
         paused = false;
         findViewById(R.id.root).setKeepScreenOn(true);
         restartIdleTimer();
@@ -451,6 +455,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void startAwaySession() {
+        if (!awayStarted) {
+            awayStarted = true;
+            failuresWithoutPicture = 0; // Home Assistant gets its own attempts
+        }
         stage = getString(R.string.away_mode);
         pictureShown = false;
         awayView.setVisibility(View.VISIBLE);
@@ -479,7 +487,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public void run() {
                         if (awayStream != self[0]) return;
-                        String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                        // Include the error type: e.g. UnknownHostException's message is just the host name.
+                        String message = e instanceof java.io.IOException && e.getMessage() != null
+                                && e.getMessage().startsWith("Home Assistant")
+                                ? e.getMessage() : e.getClass().getSimpleName() + ": " + e.getMessage();
                         onSessionFailed(message);
                     }
                 });
