@@ -11,9 +11,10 @@ A small, standalone Wear OS app for watching a live RTSP camera feed on a Samsun
 - Plays the camera's sound (AAC or G.711). Sound starts off: tap to turn it on, swipe up/down for volume
 - Includes a **Camera** tile showing a recent snapshot (refreshed every few seconds while the tile is on
   screen; Wear OS tiles can't play video). Tap it to open the live view
-- Away from home (no Wi‑Fi, e.g. on LTE) it can show the camera through Home Assistant's HTTPS API
-  instead: a picture stream without sound. Build with `HA_URL`, `HA_TOKEN` (a long-lived access token)
-  and `HA_CAMERA` (the camera entity ID) to enable it
+- Away from home (no Wi‑Fi, or the camera can't be reached) it plays the camera through Home Assistant
+  instead, like the Home Assistant app: its live stream (video and sound, a few seconds behind), or its
+  snapshots if that fails. Build with `HA_URL`, `HA_TOKEN` (a long-lived access token) and `HA_CAMERA`
+  (the camera entity ID) to enable it
 - Double-tap to switch between fit and fill, long-press for connection statistics, swipe right to go back
 
 A prebuilt APK is at [`release/RtspWatch.apk`](release/RtspWatch.apk).

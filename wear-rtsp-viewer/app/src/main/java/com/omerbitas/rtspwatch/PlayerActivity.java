@@ -30,6 +30,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     static final String EXTRA_URL = "url";
 
     private static final long WIFI_TIMEOUT_MS = 10000;
+    private static final long WIFI_TIMEOUT_AWAY_MS = 6000;
     private static final long RETRY_DELAY_MS = 3000;
     private static final long IDLE_TIMEOUT_MS = 5 * 60 * 1000;
     private static final int MAX_FAILURES = 3;
@@ -59,7 +60,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     // Away from home (no Wi-Fi, or the camera can't be reached directly): Home Assistant pictures.
     private HomeAssistant homeAssistant;
-    private HomeAssistant.Stream awayStream;
+    private HomeAssistant.Stream awayStream; // snapshots (fallback)
+    private HaLiveStream liveStream; // live video and sound
     private ImageView awayView;
     private boolean onWifi;
     private int directFailures;
@@ -73,6 +75,9 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private boolean paused;
     private int failuresWithoutPicture;
     private boolean awayStarted;
+    /** Home Assistant live stream attempts that never showed a picture; then use snapshots. */
+    private int liveFailures;
+    private static final int MAX_LIVE_FAILURES = 2;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -201,6 +206,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         directFailures = 0;
         failuresWithoutPicture = 0;
         awayStarted = false;
+        liveFailures = 0;
         requestWifi(); // starts the stream once a network is ready
     }
 
@@ -242,6 +248,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         directFailures = 0;
         failuresWithoutPicture = 0;
         awayStarted = false;
+        liveFailures = 0;
         paused = false;
         findViewById(R.id.root).setKeepScreenOn(true);
         restartIdleTimer();
@@ -292,7 +299,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .build();
         connectivity.requestNetwork(request, networkCallback);
-        handler.postDelayed(networkFallback, WIFI_TIMEOUT_MS);
+        // With Home Assistant as a fallback there's less reason to wait long for Wi-Fi.
+        handler.postDelayed(networkFallback, homeAssistant != null ? WIFI_TIMEOUT_AWAY_MS : WIFI_TIMEOUT_MS);
     }
 
     private final Runnable networkFallback = new Runnable() {
@@ -342,10 +350,15 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     // Streaming
 
     private void startSession() {
-        if (!started || paused || !networkReady || surface == null || client != null || awayStream != null) return;
-        // The camera's LAN address only works on Wi-Fi; otherwise (or if it failed) use Home Assistant.
+        if (!started || paused || !networkReady || surface == null || hasSession()) return;
+        // The camera's LAN address only works on Wi-Fi; otherwise (or if it failed) use Home Assistant:
+        // its live stream (video and sound), or its snapshots if the live stream keeps failing.
         if (homeAssistant != null && (!onWifi || directFailures > 0)) {
-            startAwaySession();
+            if (liveFailures < MAX_LIVE_FAILURES) {
+                startLiveSession();
+            } else {
+                startAwaySession();
+            }
             return;
         }
         awayView.setVisibility(View.GONE);
@@ -356,38 +369,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         pictureShown = false;
         lastRendered = 0;
 
-        final VideoDecoder[] decRef = new VideoDecoder[1];
-        final VideoDecoder dec = new VideoDecoder(surface.getSurface(), new VideoDecoder.Listener() {
-            @Override
-            public void onVideoSize(final int width, final int height) {
-                handler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        videoWidth = width;
-                        videoHeight = height;
-                        layoutVideo();
-                    }
-                });
-            }
-
-            @Override
-            public void onFirstFrameRendered() {
-                handler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (decoder != decRef[0]) return;
-                        pictureShown = true;
-                        failuresWithoutPicture = 0;
-                        if (!showStats) showStatus(null);
-                        if (muted && audio != null) {
-                            Toast.makeText(PlayerActivity.this, R.string.tap_for_sound, Toast.LENGTH_SHORT).show();
-                        }
-                    }
-                });
-            }
-        });
-        decRef[0] = dec;
-        decoder = dec;
+        final VideoDecoder dec = createDecoder();
         final RtspClient[] self = new RtspClient[1];
         client = new RtspClient(url, new RtspClient.Listener() {
             @Override
@@ -454,13 +436,130 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         handler.post(diagnosticsTicker);
     }
 
-    private void startAwaySession() {
+    /** Decoder for the live view's surface, shared by the direct and the Home Assistant stream. */
+    private VideoDecoder createDecoder() {
+        final VideoDecoder[] decRef = new VideoDecoder[1];
+        final VideoDecoder dec = new VideoDecoder(surface.getSurface(), new VideoDecoder.Listener() {
+            @Override
+            public void onVideoSize(final int width, final int height) {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        videoWidth = width;
+                        videoHeight = height;
+                        layoutVideo();
+                    }
+                });
+            }
+
+            @Override
+            public void onFirstFrameRendered() {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (decoder != decRef[0]) return;
+                        pictureShown = true;
+                        failuresWithoutPicture = 0;
+                        if (!showStats) showStatus(null);
+                        if (muted && audio != null) {
+                            Toast.makeText(PlayerActivity.this, R.string.tap_for_sound, Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+            }
+        });
+        decRef[0] = dec;
+        decoder = dec;
+        return dec;
+    }
+
+    private void startLiveSession() {
+        beginAway();
+        awayView.setVisibility(View.GONE);
+        codecLabel = "";
+        frameCount = 0;
+        keyFrameCount = 0;
+        lastRendered = 0;
+        final VideoDecoder dec = createDecoder();
+        final HaLiveStream[] self = new HaLiveStream[1];
+        liveStream = new HaLiveStream(homeAssistant.baseUrl, homeAssistant.token, homeAssistant.camera,
+                new HaLiveStream.Listener() {
+                    @Override
+                    public void onVideoTrack(String mime, byte[][] parameterSets) {
+                        codecLabel = RtspClient.MIME_H265.equals(mime) ? "H.265" : "H.264";
+                        dec.setTrack(mime, parameterSets);
+                    }
+
+                    @Override
+                    public void onVideoSample(byte[] annexB, long timeUs, boolean keyFrame) {
+                        frameCount++;
+                        if (keyFrame) keyFrameCount++;
+                        try {
+                            dec.feed(annexB, annexB.length, timeUs, keyFrame);
+                        } catch (Exception e) {
+                            onError(e);
+                        }
+                    }
+
+                    @Override
+                    public void onAudioTrack(RtspClient.AudioInfo info) {
+                        AudioPlayer old = audio;
+                        if (old != null) old.release(); // the stream restarted
+                        try {
+                            audio = new AudioPlayer(info, muted);
+                        } catch (Exception e) {
+                            audio = null; // no sound, but keep the video going
+                        }
+                    }
+
+                    @Override
+                    public void onAudioSample(byte[] data) {
+                        AudioPlayer a = audio;
+                        if (a != null) a.feed(data, 0, data.length);
+                    }
+
+                    @Override
+                    public void onError(final Exception e) {
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (liveStream != self[0]) return; // stale session
+                                if (!pictureShown) liveFailures++;
+                                onSessionFailed(describe(e));
+                            }
+                        });
+                    }
+                });
+        self[0] = liveStream;
+        new Thread(liveStream, "ha-live").start();
+        handler.removeCallbacks(diagnosticsTicker);
+        handler.post(diagnosticsTicker);
+    }
+
+    private void beginAway() {
         if (!awayStarted) {
             awayStarted = true;
             failuresWithoutPicture = 0; // Home Assistant gets its own attempts
         }
         stage = getString(R.string.away_mode);
         pictureShown = false;
+    }
+
+    /** Error text for the screen; e.g. UnknownHostException's message is just the host name. */
+    private static String describe(Exception e) {
+        String message = e.getMessage();
+        if (e instanceof java.io.IOException && message != null && message.startsWith("Home Assistant")) {
+            return message;
+        }
+        return e.getClass().getSimpleName() + (message != null ? ": " + message : "");
+    }
+
+    private boolean hasSession() {
+        return client != null || awayStream != null || liveStream != null;
+    }
+
+    private void startAwaySession() {
+        beginAway();
         awayView.setVisibility(View.VISIBLE);
         int size = Math.max(findViewById(R.id.root).getWidth(), 480);
         final HomeAssistant.Stream[] self = new HomeAssistant.Stream[1];
@@ -487,11 +586,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public void run() {
                         if (awayStream != self[0]) return;
-                        // Include the error type: e.g. UnknownHostException's message is just the host name.
-                        String message = e instanceof java.io.IOException && e.getMessage() != null
-                                && e.getMessage().startsWith("Home Assistant")
-                                ? e.getMessage() : e.getClass().getSimpleName() + ": " + e.getMessage();
-                        onSessionFailed(message);
+                        onSessionFailed(describe(e));
                     }
                 });
             }
@@ -505,7 +600,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private final Runnable diagnosticsTicker = new Runnable() {
         @Override
         public void run() {
-            if ((client == null && awayStream == null) || (pictureShown && !showStats)) return;
+            if (!hasSession() || (pictureShown && !showStats)) return;
             updateDiagnostics();
             handler.postDelayed(this, 1000);
         }
@@ -513,7 +608,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
 
     /** Shows what stage the connection is at, so a stuck stream can be diagnosed on the watch. */
     private void updateDiagnostics() {
-        if ((pictureShown && !showStats) || (client == null && awayStream == null)) return;
+        if ((pictureShown && !showStats) || !hasSession()) return;
         StringBuilder sb = new StringBuilder(pictureShown ? "" : stage);
         if (awayStream != null) {
             if (pictureShown) sb.append(getString(R.string.away_mode));
@@ -521,8 +616,9 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             showStatus(sb.toString());
             return;
         }
+        if (liveStream != null && pictureShown) sb.append(getString(R.string.away_mode));
         if (!codecLabel.isEmpty()) sb.append("\n\n").append(codecLabel).append(" video");
-        if (client.rtpPackets() > 0) sb.append("\nPackets ").append(client.rtpPackets());
+        if (client != null && client.rtpPackets() > 0) sb.append("\nPackets ").append(client.rtpPackets());
         if (frameCount > 0) {
             sb.append("\nReceived ").append(frameCount).append(" frames (")
                     .append(keyFrameCount).append(" key)");
@@ -576,6 +672,10 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         if (awayStream != null) {
             awayStream.stop();
             awayStream = null;
+        }
+        if (liveStream != null) {
+            liveStream.stop();
+            liveStream = null;
         }
     }
 
