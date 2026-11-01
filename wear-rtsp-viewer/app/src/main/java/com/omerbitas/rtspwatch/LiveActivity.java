@@ -7,7 +7,7 @@ import android.os.Bundle;
 import java.util.List;
 
 /**
- * Invisible entry point for the tile: opens the first saved stream in a fresh task (so a stale
+ * Invisible entry point for the app icon and the tile: opens the first saved stream in a fresh task (so a stale
  * live view in the background is replaced), or the stream list if nothing is saved yet.
  */
 public class LiveActivity extends Activity {

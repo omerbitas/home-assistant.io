@@ -36,7 +36,8 @@ A prebuilt APK is at [`release/RtspWatch.apk`](release/RtspWatch.apk).
 
 ## Adding streams
 
-Open **RTSP Watch** on the watch and type the URL into the field. Typing a URL on a watch keyboard is
+Open **RTSP Watch** on the watch and type the URL into the field (the list only appears while no stream is
+saved; after that the app icon opens the live view directly). Typing a URL on a watch keyboard is
 slow, so you can also send it from your computer while connected with adb:
 
 ```sh
